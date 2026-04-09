@@ -1,4 +1,9 @@
-{ config, lib, pkgs, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 
 {
   imports = [
@@ -22,7 +27,7 @@
   # Even though, we're eagerly adding firmware files that fit.
   # This is a workaround for non-modular kernels wanting to load the adsp firmware during stage-1.
   mobile.boot.stage-1.firmware = [
-    (pkgs.runCommand "initrd-firmware" {} ''
+    (pkgs.runCommand "initrd-firmware" { } ''
       cp -vrf ${config.mobile.device.firmware} $out
       chmod -R +w $out
       # Big file, fills and breaks stage-1
@@ -32,7 +37,6 @@
       cp -vf ${pkgs.linux-firmware}/lib/firmware/qcom/{a630_sqe.fw,a630_gmu.bin} $out/lib/firmware/qcom
     '')
   ];
-
 
   mobile.system.type = "android";
   mobile.system.android = {
@@ -64,8 +68,18 @@
   };
 
   mobile.quirks.qualcomm.sdm845-modem.enable = true;
+  mobile.quirks.qualcomm.sdm845-audio.enable = lib.mkDefault false;
+  mobile.quirks.qualcomm.sdm845-sensors.enable = lib.mkDefault false;
+
+  mobile.boot.stage-1.kernel.modules = lib.mkDefault [
+    "i2c_qcom_geni"
+    "rmi_core"
+    "rmi_i2c"
+    "qcom_spmi_haptics"
+  ];
 
   services.udev.extraRules = ''
-    SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT}=="1", SUBSYSTEMS=="input", ATTRS{name}=="pmi8998_haptics", TAG+="uaccess", ENV{FEEDBACKD_TYPE}="vibra"
+    # haptics disabled for now - causes udev check failure
+    # SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT}=="1", SUBSYSTEMS=="input", ATTRS{name}=="pmi8998_haptics", TAG+="uaccess", ENV{FEEDBACKD_TYPE}="vibra"
   '';
 }
