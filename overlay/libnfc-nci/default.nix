@@ -4,6 +4,9 @@
   fetchFromGitHub,
   autoreconfHook,
   pkg-config,
+  automake,
+  autoconf,
+  libtool,
   dbus,
   glib,
   openssl,
@@ -24,10 +27,23 @@ stdenv.mkDerivation rec {
 
   patches = [
     ./PrintNDEFContent.patch
+    ./fix-nfa-dm-p2p.patch
   ];
 
+  nativeBuildInputs = [
+    autoreconfHook
+    pkg-config
+    automake
+    autoconf
+    libtool
+  ];
+
+  # Run bootstrap to generate configure script
+  preConfigure = ''
+    ./bootstrap
+  '';
+
   # Fix missing includes for modern compilers
-  # Add multiple headers that are needed but not explicitly included
   NIX_CFLAGS_COMPILE = "-include unistd.h -include string.h -include sys/times.h -include pthread.h -D_GNU_SOURCE";
 
   buildInputs = [

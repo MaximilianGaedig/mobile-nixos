@@ -1,50 +1,39 @@
 From 7f4f68b7a46fbb70a10b66e48d3c0c8f2acfe4e8 Mon Sep 17 00:00:00 2001
 From: biemster <lasse@biemster.nl>
 Date: Sun, 10 Mar 2024 12:04:47 +0100
-Subject: [PATCH] Enable NFC on OnePlus 6
+Subject: [PATCH] Enable NFC on OnePlus 6/6T
 
-Enable the SPI controller and add GPIO pin configurations for the NXP
-NFC controller.
+Add additional GPIO pin configurations for the NXP NFC controller.
+NFC is already enabled via I2C3, this just adds proper pin states
+for VEN (enable) and INT (interrupt) pins.
 
 Signed-off-by: biemster <lasse@biemster.nl>
 ---
- arch/arm64/boot/dts/qcom/sdm845-oneplus-enchilada.dts | 18 +++++++++++++++++-
- 1 file changed, 17 insertions(+), 1 deletion(-)
+ arch/arm64/boot/dts/qcom/sdm845-oneplus-common.dtsi | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
 
-diff --git a/arch/arm64/boot/dts/qcom/sdm845-oneplus-enchilada.dts b/arch/arm64/boot/dts/qcom/sdm845-oneplus-enchilada.dts
+diff --git a/arch/arm64/boot/dts/qcom/sdm845-oneplus-common.dtsi b/arch/arm64/boot/dts/qcom/sdm845-oneplus-common.dtsi
 index 1234567..abcdefg 100644
---- a/arch/arm64/boot/dts/qcom/sdm845-oneplus-enchilada.dts
-+++ b/arch/arm64/boot/dts/qcom/sdm845-oneplus-enchilada.dts
-@@ -1536,7 +1536,8 @@
- 			interconnect-names = "qup-core\0qup-config\0qup-memory";
- 			dmas = <0x3e 0x00 0x03 0x03 0x3e 0x01 0x03 0x03>;
- 			dma-names = "tx\0rx";
--			status = "disabled";
-+			status = "okay";
-+			clock-frequency = <0x61a80>;
- 		};
- 
- 		spi@88c000 {
-@@ -3281,6 +3282,20 @@
- 				bias-pull-up;
- 				output-high;
- 			};
+--- a/arch/arm64/boot/dts/qcom/sdm845-oneplus-common.dtsi
++++ b/arch/arm64/boot/dts/qcom/sdm845-oneplus-common.dtsi
+@@ -1279,6 +1279,20 @@
+ 		function = "gpio";
+ 		drive-strength = <6>;
+ 		bias-pull-up;
++	};
 +
-+			nfc-ven-default-state {
-+				pins = "gpio12";
-+				function = "gpio";
-+				drive-strength = <0x02>;
-+				bias-pull-up;
-+			};
++	nfc-ven-default-state {
++		pins = "gpio12";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-pull-up;
++		output-high;
++	};
 +
-+			nfc-int-default-state {
-+				pins = "gpio63";
-+				function = "gpio";
-+				drive-strength = <0x02>;
-+				bias-pull-up;
-+			};
- 		};
- 
- 		remoteproc@4080000 {
--- 
-2.40.0
++	nfc-int-default-state {
++		pins = "gpio63";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-pull-up;
+ 	};
+ };

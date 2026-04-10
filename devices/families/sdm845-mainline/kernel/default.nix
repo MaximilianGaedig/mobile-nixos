@@ -17,8 +17,4 @@ mobile-nixos.kernel-builder {
 
   isModular = false;
   isCompressed = "gz";
-
-  # NFC patch for OnePlus 6/6T - enables SPI and GPIOs for NXP NFC controller
-  # This is safe for other SDM845 devices as it only affects specific DT nodes
-  patches = [ ./0001-oneplus-enchilada-enable-nfc.patch ];
 }

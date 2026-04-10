@@ -17,11 +17,12 @@ in
       description = ''
         Enable NFC support for SDM845 devices (OnePlus 6/6T).
 
-        This enables the SPI controller and GPIO pins required for the NXP 
-        NFC controller via a kernel DTB patch.
+        This enables the I2C and GPIO configuration for the NXP NFC controller.
+        NFC hardware is already enabled in the sdm845-mainline kernel.
 
-        Note: Userspace tools (libnfc-nci) are not yet packaged. NFC hardware
-        will be enabled but you'll need to manually install userspace tools.
+        Note: Userspace tools (libnfc-nci) are not yet packaged due to upstream
+        code quality issues. NFC hardware will work but userspace applications
+        will need to be installed manually.
       '';
     };
   };
@@ -31,10 +32,11 @@ in
     boot.kernelModules = [
       "nfcsim"
       "nci"
-      "nci_spi"
+      "nci_i2c"
     ];
 
     # Note: libnfc-nci userspace tools are not yet packaged
+    # See: https://github.com/NXPNFCLinux/linux_libnfc-nci
     # environment.systemPackages = [ pkgs.libnfc-nci ];
   };
 }

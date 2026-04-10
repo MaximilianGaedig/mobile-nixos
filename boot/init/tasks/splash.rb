@@ -7,9 +7,9 @@ class Tasks::Splash < SingletonTask
 
   def run()
     args = []
-    if LOG_LEVEL ==  Logger::DEBUG
-      args << "--verbose"
-    end
+    # if LOG_LEVEL ==  Logger::DEBUG
+    args << "--verbose"
+    # end
 
     if System.cmdline().grep("mobile-nixos.kexec=yes").any?
       args << "--skip-fadein"

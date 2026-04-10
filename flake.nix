@@ -31,6 +31,7 @@
         Usage:
           nix build .#packages.devices.<device>     Build device image
           nix build .#packages.examples.<example>.<device>  Build example system
+          nix build .#packages.local.<device>       Build with local.nix config
           nix develop                              Enter development shell
           nix build .#packages.help                Show this help
 
@@ -68,6 +69,19 @@
                   pkgs = makePkgs "aarch64-linux";
                   device = device;
                   configuration = [ ];
+                }).outputs.default;
+            }) all-devices
+          );
+
+          # Build with local.nix included (disables splash, etc.)
+          local = builtins.listToAttrs (
+            builtins.map (device: {
+              name = device;
+              value =
+                (import ./lib/eval-with-configuration.nix {
+                  pkgs = makePkgs "aarch64-linux";
+                  device = device;
+                  configuration = [ ./local.nix ];
                 }).outputs.default;
             }) all-devices
           );
