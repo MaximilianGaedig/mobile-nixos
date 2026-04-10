@@ -26,13 +26,9 @@ stdenv.mkDerivation rec {
     ./PrintNDEFContent.patch
   ];
 
-  # Fix missing includes for modern compilers by adding unistd.h globally
-  NIX_CFLAGS_COMPILE = "-include unistd.h";
-
-  nativeBuildInputs = [
-    autoreconfHook
-    pkg-config
-  ];
+  # Fix missing includes for modern compilers
+  # Add multiple headers that are needed but not explicitly included
+  NIX_CFLAGS_COMPILE = "-include unistd.h -include string.h -include sys/times.h -include pthread.h -D_GNU_SOURCE";
 
   buildInputs = [
     dbus
