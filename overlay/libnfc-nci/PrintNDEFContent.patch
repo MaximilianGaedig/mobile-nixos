@@ -1,0 +1,11 @@
+--- a/demoapp/main.c
++++ b/demoapp/main.c
+@@ -445,6 +445,8 @@ void onMessageReceived(unsigned char *message, unsigned int length)
+ {
+     unsigned int i = 0x00;
+     printf("\n\t\tNDEF Message Received : \n");
++    /* Forward declaration */
++    extern void PrintNDEFContent(nfc_tag_info_t* TagInfo, ndef_info_t* NDEFinfo, unsigned char* ndefRaw, unsigned int ndefRawLen);
+     PrintNDEFContent(NULL, NULL, message, length);
+ }
+ 

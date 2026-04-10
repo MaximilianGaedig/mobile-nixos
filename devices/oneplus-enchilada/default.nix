@@ -56,4 +56,7 @@
     ];
     deviceName = "oneplus6";
   };
+
+  # NFC support
+  mobile.quirks.qualcomm.sdm845-nfc.enable = true;
 }

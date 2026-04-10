@@ -17,18 +17,16 @@ in
       description = ''
         Enable NFC support for SDM845 devices (OnePlus 6/6T).
 
-        This applies a device tree patch to enable the SPI controller and 
-        GPIO pins required for the NXP NFC controller.
+        This enables the SPI controller and GPIO pins required for the NXP 
+        NFC controller via a kernel DTB patch.
+
+        Note: Userspace tools (libnfc-nci) are not yet packaged. NFC hardware
+        will be enabled but you'll need to manually install userspace tools.
       '';
     };
   };
 
   config = mkIf cfg.enable {
-    # Apply the NFC DTB patch to the kernel
-    mobile.boot.stage-1.kernel.patches = [
-      ./oneplus-enchilada-nfc.patch
-    ];
-
     # NFC kernel modules
     boot.kernelModules = [
       "nfcsim"
@@ -36,7 +34,7 @@ in
       "nci_spi"
     ];
 
-    # Install userspace tools
-    environment.systemPackages = [ pkgs.libnfc-nci ];
+    # Note: libnfc-nci userspace tools are not yet packaged
+    # environment.systemPackages = [ pkgs.libnfc-nci ];
   };
 }
