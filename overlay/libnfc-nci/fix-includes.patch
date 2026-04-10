@@ -1,0 +1,10 @@
+--- a/src/libnfc-nci/adaptation/libmain.c
++++ b/src/libnfc-nci/adaptation/libmain.c
+@@ -16,6 +16,7 @@
+  ******************************************************************************/
+ 
+ #include <stdlib.h>
++#include <unistd.h>
+ #include <nfc_api.h>
+ #include <nfc_types.h>
+ 

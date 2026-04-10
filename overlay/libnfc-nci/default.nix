@@ -24,8 +24,17 @@ stdenv.mkDerivation rec {
 
   patches = [
     ./PrintNDEFContent.patch
-    ./fix-sleep.patch
   ];
+
+  # Fix missing includes for modern compilers
+  postPatch = ''
+    # Add unistd.h to files that use read/write/close/sleep
+    find src -name "*.c" -exec grep -l "\\b\(read\\|write\\|close\\|sleep\\)\\s*(" {} \; | while read f; do
+      if ! grep -q "#include <unistd.h>" "$f"; then
+        sed -i '1a\\#include <unistd.h>' "$f"
+      fi
+    done
+  '';
 
   nativeBuildInputs = [
     autoreconfHook
