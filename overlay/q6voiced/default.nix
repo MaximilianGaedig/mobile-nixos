@@ -4,12 +4,8 @@
   tinyalsa,
   dbus,
   stdenv,
+  pkg-config,
 }:
-
-let
-  dbusLib = dbus.lib or dbus.out or dbus;
-  dbusDev = dbus.dev or dbus;
-in
 
 stdenv.mkDerivation rec {
   pname = "q6voiced";
@@ -25,16 +21,19 @@ stdenv.mkDerivation rec {
 
   buildInputs = [
     tinyalsa
-    dbusLib
-    dbusDev
+    dbus
+  ];
+
+  nativeBuildInputs = [
+    pkg-config
   ];
 
   buildPhase = ''
+    export DBUS_CFLAGS=$(pkg-config --cflags dbus-1)
+    export DBUS_LIBS=$(pkg-config --libs dbus-1)
     gcc -o q6voiced q6voiced.c \
-      -I${dbusDev}/include/dbus-1.0 \
-      -I${dbusDev}/include \
-      -I${dbusLib}/include/dbus-1.0 \
-      -L${dbusLib}/lib -ldbus-1 \
+      $DBUS_CFLAGS \
+      $DBUS_LIBS \
       -L${tinyalsa}/lib -ltinyalsa
   '';
 

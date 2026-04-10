@@ -190,6 +190,22 @@ in
           RemainAfterExit = true;
         };
       };
+
+      qbootctl = mkIf (pkgs ? qbootctl) {
+        description = "Mark boot as successful";
+        wantedBy = [ "multi-user.target" ];
+        serviceConfig = {
+          ExecStart = "${pkgs.qbootctl}/bin/qbootctl";
+          Type = "oneshot";
+          RemainAfterExit = true;
+        };
+      };
+
+      ModemManager = {
+        serviceConfig = {
+          Environment = "MODEMMANAGER_OPTS=--test-quick-suspend-resume";
+        };
+      };
     };
   };
 }
