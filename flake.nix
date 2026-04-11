@@ -43,19 +43,24 @@
       '';
 
       # Overlay packages - we need to evaluate for multiple systems
-      overlayPkgsX86 = nixpkgs.legacyPackages.x86_64-linux.appendOverlays [ overlay ];
       overlayPkgsAarch64 = nixpkgs.legacyPackages.aarch64-linux.appendOverlays [ overlay ];
     in
     {
       # Expose overlay for external use
       overlays.default = overlay;
 
+      # NixOS modules for use in other flakes
+      nixosModules = {
+        default = ./lib/eval-with-configuration.nix;
+        service-fbkeyboard = ./modules/service-fbkeyboard.nix;
+      };
+
       # Default package shows help
       defaultPackage = nixpkgs.legacyPackages.x86_64-linux.writeText "mobile-nixos-help" helpText;
 
       packages =
         let
-          pkgs = overlayPkgsX86;
+          pkgs = overlayPkgsAarch64;
         in
         pkgs
         // {
@@ -70,6 +75,43 @@
                   device = device;
                   configuration = [ ];
                 }).outputs.default;
+            }) all-devices
+          );
+
+          # Full eval for accessing config, options, pkgs
+          eval = builtins.listToAttrs (
+            builtins.map (device: {
+              name = device;
+              value = import ./lib/eval-with-configuration.nix {
+                pkgs = makePkgs "aarch64-linux";
+                device = device;
+                configuration = [ ];
+              };
+            }) all-devices
+          );
+
+          # Source kernel config paths for normalization
+          kernel-config = builtins.listToAttrs (
+            builtins.map (device: {
+              name = device;
+              value =
+                let
+                  # Get absolute path to source (not store path)
+                  root = /. + builtins.toString ./.;
+                  deviceConfig = root + "/devices/${device}/kernel/config.aarch64";
+                  # Check common family configs
+                  familyConfigs = builtins.filter (p: builtins.pathExists p) [
+                    (root + "/devices/families/sdm845-mainline/kernel/config.aarch64")
+                    (root + "/devices/families/sdm845/kernel/config.aarch64")
+                    (root + "/devices/families/mainline/kernel/config.aarch64")
+                  ];
+                in
+                if builtins.pathExists deviceConfig then
+                  deviceConfig
+                else if familyConfigs != [ ] then
+                  builtins.head familyConfigs
+                else
+                  throw "Could not find kernel config for device ${device}";
             }) all-devices
           );
 
@@ -97,7 +139,7 @@
                       pkgs = makePkgs "aarch64-linux";
                       device = device;
                       configuration = [ (import ./examples/${example}) ];
-                    }).outputs.toplevel;
+                    }).outputs.default;
                 }) all-devices
               );
             }) all-examples

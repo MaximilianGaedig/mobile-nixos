@@ -12,6 +12,20 @@
 require "shellwords"
 ROOT = File.join(__dir__, "..")
 
+# Translate nix store path to source path
+# /nix/store/xxx/path/to/file -> /repo/root/path/to/file
+def store_to_source(path)
+  if path.match(%r{^/nix/store/[^/]+/})
+    # Extract the relative path after the store hash
+    relative = path.sub(%r{^/nix/store/[^/]+/}, "")
+    result = File.join(ROOT, relative)
+    $stderr.puts "DEBUG: Translated #{path} -> #{result}" if ENV['DEBUG']
+    result
+  else
+    path
+  end
+end
+
 def usage()
   puts "Usage: bin/kernel-normalize-config [--file=config.path] --only-check <device_name>"
   puts ""
@@ -57,16 +71,14 @@ ALSO_COMMIT =
 
 DEVICE = other_args.shift
 
-args =
-  # Is the device a path?
-  if DEVICE.match(%r{/})
-    ["--arg", "device", DEVICE.sub(%r{/+$}, "")]
-  else
-    ["--argstr", "device", DEVICE]
-  end
+# Build the flake attribute path for the device
+def flake_attr(device)
+  # Handle path-based devices
+  device_name = device.sub(%r{/+$}, "").split("/").last
+  ".#packages.eval.#{device_name}"
+end
 
-# 
-args << File.join(ROOT, "support/kernel-config/default.nix")
+FLAKE_ATTR = flake_attr(DEVICE)
 
 @file =
   if params["file"]
@@ -88,13 +100,24 @@ end
 unless ONLY_CHECK
   unless @file
     $stderr.puts "\nGetting config file path to update..."
-    @file = 
-      `#{[
-        "nix-instantiate",
-        "--eval",
-        *args,
-        "--attr", "config.mobile.boot.stage-1.kernel.package.configfile",
-      ].shelljoin}`.strip
+    
+    # Construct source path directly - avoid Nix store paths
+    deviceConfig = File.join(ROOT, "devices", DEVICE, "kernel", "config.aarch64")
+    
+    # Check if device has its own config, otherwise look in families
+    if File.exist?(deviceConfig)
+      @file = deviceConfig
+    else
+      # Check common family locations
+      families = ["sdm845-mainline", "sdm845", "mainline"]
+      families.each do |family|
+        familyConfig = File.join(ROOT, "devices", "families", family, "kernel", "config.aarch64")
+        if File.exist?(familyConfig)
+          @file = familyConfig
+          break
+        end
+      end
+    end
   end
 
   unless @file and File.exist?(@file)
@@ -112,30 +135,34 @@ unless ONLY_CHECK
   end
 
   $stderr.puts "\nNOTE: This will update '#{@file}'\n\n"
+  
+  # Debug: show the translated path
+  $stderr.puts "Source path: #{@file}"
+  $stderr.puts "File exists: #{File.exist?(@file)}"
+  $stderr.puts "File writable: #{File.writable?(@file) rescue false}"
 end
 
-attr =
-  if ONLY_CHECK
-    "config.mobile.boot.stage-1.kernel.package.validatedConfig"
-  else
-    "config.mobile.boot.stage-1.kernel.package.normalizedConfig"
-  end
-
 result = `#{[
-  "nix-build",
-  "--no-out-link",
-  *args,
-  "-A", attr
+  "nix", "build",
+  "--impure",
+  "--no-link",
+  "--print-out-paths",
+  "#{FLAKE_ATTR}.config.mobile.boot.stage-1.kernel.package.#{ONLY_CHECK ? "validatedConfig" : "normalizedConfig"}",
 ].shelljoin}`.strip
 
+unless $?.success?
+  $stderr.puts "ERROR: nix build failed!"
+  exit 1
+end
+
 if ONLY_CHECK
-  if $?.success?
-    $stderr.puts "Configuration passed."
-    exit 0
-  else
-    $stderr.puts "Configuration is stale."
-    exit 1
-  end
+  $stderr.puts "Configuration passed."
+  exit 0
+end
+
+unless result and File.exist?(result)
+  $stderr.puts "ERROR: Build result not found at: #{result}"
+  exit 1
 end
 
 # We "cat" into the file to ensure we don't copy the store path access rights.

@@ -8,14 +8,27 @@ in
   # Keep sorted.
   adbd = callPackage ./adbd { };
   android-headers = callPackage ./android-headers { };
+  bootrr = callPackage ./bootrr { };
+  buffyboard = callPackage ./buffyboard { };
   dtbTool = callPackage ./dtbtool { };
   dtbTool-exynos = callPackage ./dtbtool-exynos { };
+  f-scripts = callPackage ./f-scripts { };
+  fbkeyboard = callPackage ./fbkeyboard { };
+  framebufferphone = callPackage ./framebufferphone { };
+  hkdm = callPackage ./hkdm { };
+  iskey = callPackage ./iskey { };
   libhybris = callPackage ./libhybris { };
   mkbootimg = callPackage ./mkbootimg { };
   msm-fb-refresher = callPackage ./msm-fb-refresher { };
+  pbsplash = callPackage ./pbsplash { };
   ply-image = callPackage ./ply-image { };
   qc-image-unpacker = callPackage ./qc-image-unpacker { };
+  reboot-mode = callPackage ./reboot-mode { };
+  shutdown-clear-rtc-wakealarm = callPackage ./shutdown-clear-rtc-wakealarm { };
+  tfblib = callPackage ./tfblib { };
+  ttyescape = callPackage ./ttyescape { };
   ufdt-apply-overlay = callPackage ./ufdt-apply-overlay { };
+  watchdog-kick = callPackage ./watchdog-kick { };
 
   # Extra "libs"
   mkExtraUtils = import ./lib/extra-utils.nix {

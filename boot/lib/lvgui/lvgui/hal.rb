@@ -7,16 +7,20 @@ module LVGUI::HAL
   # Provide battery information
   class Battery
     NODE_BASE = "/sys/class/power_supply"
-    # Guesstimates the main battery for a list of likely candidates
+    # Finds the main battery by scanning power supplies for TYPE=Battery
     def self.main_battery()
-      node = %w{
-        battery
-        bms
-        BAT0
-        *-battery
-      }.map { |name| Dir.glob(File.join(NODE_BASE, name)).first }
-        .compact
-        .first
+      node = nil
+      Dir.glob(File.join(NODE_BASE, "*")).each do |path|
+        begin
+          uevent = File.read(File.join(path, "uevent"))
+          if uevent.include?("POWER_SUPPLY_TYPE=Battery")
+            node = path
+            break
+          end
+        rescue
+          # Ignore errors reading uevent
+        end
+      end
 
       if node
         Battery.new(node)

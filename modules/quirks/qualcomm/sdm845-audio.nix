@@ -101,9 +101,13 @@ in
       q6voiced = mkIf (pkgs ? q6voiced) {
         description = "Enable q6voice audio when call is performed with ModemManager";
         wantedBy = [ "multi-user.target" ];
-        after = [ "ModemManager.service" ];
+        after = [
+          "ModemManager.service"
+          "dbus.service"
+        ];
+        requires = [ "dbus.service" ];
         serviceConfig = {
-          ExecStart = "${pkgs.q6voiced}/bin/q6voiced -c ${toString cfg.q6voiced.card} -d ${toString cfg.q6voiced.device}";
+          ExecStart = "${pkgs.q6voiced}/bin/q6voiced hw:${toString cfg.q6voiced.card},${toString cfg.q6voiced.device}";
           Restart = "always";
         };
       };

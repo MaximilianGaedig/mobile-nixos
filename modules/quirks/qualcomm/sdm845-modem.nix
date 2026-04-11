@@ -176,6 +176,7 @@ in
       bootmac = mkIf (pkgs ? bootmac) {
         description = "Configure WiFi MAC address at boot";
         wantedBy = [ "multi-user.target" ];
+        path = [ pkgs.util-linux ]; # For logger command
         serviceConfig = {
           ExecStart = "${pkgs.bootmac}/bin/bootmac";
           RemainAfterExit = true;

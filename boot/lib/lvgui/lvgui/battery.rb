@@ -35,9 +35,10 @@ class LVGUI::Battery < LVGUI::Widget
           LVGL::Symbols::BATTERY_EMPTY
         end
 
-      set_text("#{symbol} #{@battery.percent}%")
+      percent_str = @battery.percent == "unknown" ? "N/A" : "#{@battery.percent}%"
+      set_text("#{symbol} #{percent_str}")
     else
-      set_text("")
+      set_text("N/A")
     end
   end
 

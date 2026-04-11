@@ -12,6 +12,35 @@ $title = data["title"]
 
 $color = $color.rjust(6, "0").rjust(8, "F").to_i(16)
 
+# Load LED and Haptics libraries if available
+require "/lib/leds.rb" if File.exist?("/lib/leds.rb")
+require "/lib/haptics.rb" if File.exist?("/lib/haptics.rb")
+
+# Trigger LED and haptic feedback based on error code
+Thread.new do
+  case $code
+  when "mount_failure"
+    LEDs.error_mount_failure if defined?(LEDs)
+    Haptics.error_mount_failure if defined?(Haptics)
+  when "no_generation"
+    LEDs.error_no_generation if defined?(LEDs)
+    Haptics.error_no_generation if defined?(Haptics)
+  when "exec_failure"
+    LEDs.error_exec_failure if defined?(LEDs)
+    Haptics.error_exec_failure if defined?(Haptics)
+  when "dependency_hung"
+    LEDs.error_dependency_hung if defined?(LEDs)
+    Haptics.error_dependency_hung if defined?(Haptics)
+  when "uncontrolled_abort"
+    LEDs.error_uncontrolled_abort if defined?(LEDs)
+    Haptics.error_uncontrolled_abort if defined?(Haptics)
+  else
+    # Default error pattern
+    LEDs.blink_pattern(pattern: [[200, 200]], duration: 3000) if defined?(LEDs)
+    Haptics.vibrate(duration_ms: 500) if defined?(Haptics)
+  end
+end
+
 class UI
   # As this is not using BaseWindow, LVGUI::init isn't handled for us.
   LVGUI.init(assets_path: "boot-error/assets")

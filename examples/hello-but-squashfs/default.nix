@@ -1,12 +1,17 @@
 # Ensure CLI passes down arguments
-{ ... }@args:
+{ device, ... }@args:
 
-import ../../lib/eval-with-configuration.nix (args // {
-  configuration = [ (import ./configuration.nix) ];
-  additionalHelpInstructions = { device }: ''
-    You can build the `-A outputs.default` attribute to build the default output
-    for your device.
+import ../../lib/eval-with-configuration.nix (
+  args
+  // {
+    configuration = [ (import ./configuration.nix) ];
+    additionalHelpInstructions =
+      { device }:
+      ''
+        You can build the `-A outputs.default` attribute to build the default output
+        for your device.
 
-     $ nix-build examples/hello-but-squashfs --argstr device ${device} -A outputs.default
-  '';
-})
+         $ nix-build examples/hello-but-squashfs --argstr device ${device} -A outputs.default
+      '';
+  }
+)

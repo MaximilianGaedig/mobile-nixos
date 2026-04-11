@@ -49,6 +49,9 @@ class UI
     # Common spacing between widgets
     @spacing = 5 * @unit
 
+    # Add battery indicator to top-right corner
+    add_battery()
+
     # The page holds the UI except for the keyboard.
     # This can be used to move the display up, when showing the keyboard.
     add_page()
@@ -246,6 +249,19 @@ class UI
       style.body_main_color = BG_COLOR
       style.body_grad_color = BG_COLOR
     end
+  end
+
+  def add_battery()
+    @battery = LVGUI::Battery.new(@screen)
+    @battery.instance_exec do
+      style = get_style(LVGL::LABEL_STYLE::MAIN).dup()
+      set_style(LVGL::LABEL_STYLE::MAIN, style)
+      style.text_font = LVGUI::Fonts.primary(16)
+      style.text_color = FG_COLOR
+      set_align(LVGL::LABEL_ALIGN::RIGHT)
+    end
+    # Position in top-right corner with some padding
+    @battery.set_pos(@screen.get_width - @battery.get_width - @unit, @unit)
   end
 
   def add_page()

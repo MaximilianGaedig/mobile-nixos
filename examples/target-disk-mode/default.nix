@@ -1,21 +1,26 @@
 # Ensure CLI passes down arguments
-{ ... }@args:
+{ device, ... }@args:
 
-import ../../lib/eval-with-configuration.nix (args // {
-  configuration = [ (import ./configuration.nix) ];
-  additionalHelpInstructions = { device }: ''
-    The build output to choose depends on the target.
+import ../../lib/eval-with-configuration.nix (
+  args
+  // {
+    configuration = [ (import ./configuration.nix) ];
+    additionalHelpInstructions =
+      { device }:
+      ''
+        The build output to choose depends on the target.
 
-    Pinephone, other u-boot, and depthcharge devices: 
+        Pinephone, other u-boot, and depthcharge devices: 
 
-      $ nix-build examples/target-disk-mode --argstr device ${device} -A outputs.default
+          $ nix-build examples/target-disk-mode --argstr device ${device} -A outputs.default
 
-    Android-based devices:
+        Android-based devices:
 
-      $ nix-build examples/target-disk-mode --argstr device ${device} -A outputs.android-bootimg
+          $ nix-build examples/target-disk-mode --argstr device ${device} -A outputs.android-bootimg
 
-    App "simulator":
+        App "simulator":
 
-      $ nix-build examples/target-disk-mode --argstr device uefi-x86_64 -A outputs.app-simulator
-  '';
-})
+          $ nix-build examples/target-disk-mode --argstr device uefi-x86_64 -A outputs.app-simulator
+      '';
+  }
+)
