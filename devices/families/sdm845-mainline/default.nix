@@ -31,7 +31,7 @@
       cp -vrf ${config.mobile.device.firmware} $out
       chmod -R +w $out
       # Big file, fills and breaks stage-1
-      find $out/lib/firmware/qcom/sdm845 -name "modem.mbn" -delete -print
+      rm -v $out/lib/firmware/qcom/sdm845/*/modem.mbn
 
       # Copy extra a630 firmware from linux-firmware
       cp -vf ${pkgs.linux-firmware}/lib/firmware/qcom/{a630_sqe.fw,a630_gmu.bin} $out/lib/firmware/qcom
@@ -39,7 +39,6 @@
   ];
 
   mobile.system.type = "android";
-  # mobile.system.android.useSparseImage = true;
   mobile.system.android = {
     # Assumed all SDM845 devices use A/B
     ab_partitions = lib.mkDefault true;
@@ -69,6 +68,9 @@
   };
 
   mobile.quirks.qualcomm.sdm845-modem.enable = true;
+  mobile.quirks.qualcomm.sdm845-audio.enable = lib.mkDefault false;
+  mobile.quirks.qualcomm.sdm845-sensors.enable = lib.mkDefault false;
+
   mobile.boot.stage-1.kernel.modules = lib.mkDefault [
     "i2c_qcom_geni"
     "rmi_core"
@@ -77,6 +79,7 @@
   ];
 
   services.udev.extraRules = ''
-    SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT}=="1", SUBSYSTEMS=="input", ATTRS{name}=="pmi8998_haptics", TAG+="uaccess", ENV{FEEDBACKD_TYPE}="vibra"
+    # haptics disabled for now - causes udev check failure
+    # SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT}=="1", SUBSYSTEMS=="input", ATTRS{name}=="pmi8998_haptics", TAG+="uaccess", ENV{FEEDBACKD_TYPE}="vibra"
   '';
 }
