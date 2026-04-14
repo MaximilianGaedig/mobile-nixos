@@ -294,7 +294,7 @@ let
               echo "stripping FHS paths in \`$mf'..."
               sed -i "$mf" -e 's|/usr/bin/||g ; s|/bin/||g ; s|/sbin/||g'
           done
-          sed -i Makefile -e 's|= depmod|= ${buildPackages.kmod}/bin/depmod|'
+          sed -i Makefile -e 's|= depmod|= ${buildPackages.kmod}/bin/depmod|' -e 's|:= depmod|:= ${buildPackages.kmod}/bin/depmod|'
           if [ -e scripts/ld-version.sh ]; then
             sed -i scripts/ld-version.sh -e "s|/usr/bin/awk|${buildPackages.gawk}/bin/awk|"
           fi
