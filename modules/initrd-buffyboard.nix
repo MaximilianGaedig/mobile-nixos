@@ -22,7 +22,7 @@ in
   config = mkIf (config.mobile.boot.stage-1.enable && cfg.enable) {
     mobile.boot.stage-1 = {
       extraUtils = [
-        { package = pkgs.buffyboard; }
+        { package = pkgs.buffybox; }
       ];
 
       tasks = [
