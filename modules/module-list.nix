@@ -47,6 +47,7 @@
   ./luks.nix
   ./mobile.nix
   ./mobile-device.nix
+  ./nixos-boot-cfg.nix
   ./nixpkgs.nix
   ./outputs.nix
   ./plymouth.nix
