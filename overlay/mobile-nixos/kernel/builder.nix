@@ -498,12 +498,11 @@ let
         buildPhase = if enableCombiningBuildAndInstallQuirk then ":" else null;
 
         installTargets =
-          # zinstall only deals with `Image.gz`
-          # install will install the uncompressed kernel only...
-          # Though it's not an issue as we copy it ourselves anyway.
-          (if isCompressed == "gz" then [ "zinstall" ] else [ "install" ])
-          ++ installTargets
-          ++ optional isModular "modules_install";
+          # Use install rather than zinstall because on Linux >= 6.16
+          # zinstall may require additional files (e.g. vmlinuz.efi on
+          # arm64 with CONFIG_EFI_ZBOOT) that we do not necessarily
+          # build.  We copy the kernel image ourselves in postInstall.
+          [ "install" ] ++ installTargets ++ optional isModular "modules_install";
 
         preInstall =
           optionalString enableCombiningBuildAndInstallQuirk ''
@@ -530,6 +529,9 @@ let
             echo ":: Copying configuration file"
             # Helpful in cases where the kernel isn't built with /proc/config.gz
             cp -v "$buildRoot/.config" "$out/build.config"
+
+            echo ":: Copying kernel image"
+            cp -v "$buildRoot/arch/${platform.linuxArch}/boot/${kernelTarget}" "$out/"
 
             # Clean up potential broken symlinks
             rm -vf "$out/lib/modules/${modDirVersion}/build"
