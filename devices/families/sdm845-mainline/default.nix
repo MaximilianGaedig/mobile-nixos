@@ -5,6 +5,38 @@
   ...
 }:
 
+let
+  sdm845Kernel =
+    (pkgs.buildLinux {
+      version = "6.16.7";
+      modDirVersion = "6.16.7";
+      configfile = ./kernel/config.aarch64;
+
+      src = pkgs.fetchFromGitLab {
+        owner = "sdm845-mainline";
+        repo = "linux";
+        rev = "sdm845-6.16.7-r0";
+        hash = "sha256-XYlXuzapuesiTpvquuz0b6yPyAqEdK9lMdglST+EZhk=";
+      };
+
+      extraNativeBuildInputs = [ pkgs.zstd ];
+      kernelPatches = [ ];
+      ignoreConfigErrors = true;
+    }).overrideAttrs
+      (oldAttrs: {
+        postInstall = (oldAttrs.postInstall or "") + ''
+          cp -v "$buildRoot/arch/arm64/boot/Image.gz" "$out/"
+        '';
+        passthru = (oldAttrs.passthru or { }) // {
+          file = "Image.gz";
+          isQcdt = false;
+          isExynosDT = false;
+        };
+      });
+
+  linux-sdm845 = pkgs.linuxPackagesFor sdm845Kernel;
+in
+
 {
   imports = [
     ./sound.nix
@@ -16,8 +48,28 @@
 
   mobile.boot.stage-1 = {
     compression = "xz";
-    kernel.package = (pkgs.callPackage ./kernel { });
+    kernel = {
+      useNixOSKernel = true;
+      modules = lib.mkDefault [
+        "i2c_qcom_geni"
+        "rmi_core"
+        "rmi_i2c"
+        "qcom_spmi_haptics"
+        # Modem
+        "qrtr"
+        "qrtr_smd"
+        "qcom_qmi_helpers"
+        "mhi"
+        "mhi_wwan_ctrl"
+        "mhi_net"
+        # Camera
+        "camss"
+        "video_qcom_camss"
+      ];
+    };
   };
+
+  boot.kernelPackages = lib.mkForce linux-sdm845;
 
   hardware.enableRedistributableFirmware = true;
 
@@ -70,23 +122,6 @@
   mobile.quirks.qualcomm.sdm845-modem.enable = true;
   mobile.quirks.qualcomm.sdm845-audio.enable = lib.mkDefault false;
   mobile.quirks.qualcomm.sdm845-sensors.enable = lib.mkDefault false;
-
-  mobile.boot.stage-1.kernel.modules = lib.mkDefault [
-    "i2c_qcom_geni"
-    "rmi_core"
-    "rmi_i2c"
-    "qcom_spmi_haptics"
-    # Modem
-    "qrtr"
-    "qrtr_smd"
-    "qcom_qmi_helpers"
-    "mhi"
-    "mhi_wwan_ctrl"
-    "mhi_net"
-    # Camera
-    "camss"
-    "video_qcom_camss"
-  ];
 
   services.udev.extraRules = ''
     # haptics disabled for now - causes udev check failure

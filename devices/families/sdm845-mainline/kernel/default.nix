@@ -1,22 +1,35 @@
 {
-  mobile-nixos,
-  fetchFromGitLab,
   pkgs,
   ...
 }:
 
-mobile-nixos.kernel-builder {
-  version = "6.16.7";
-  configfile = ./config.aarch64;
+let
+  kernel = pkgs.buildLinux {
+    version = "6.16.7";
+    modDirVersion = "6.16.7";
+    configfile = ./config.aarch64;
 
-  src = fetchFromGitLab {
-    owner = "sdm845-mainline";
-    repo = "linux";
-    rev = "sdm845-6.16.7-r0";
-    hash = "sha256-XYlXuzapuesiTpvquuz0b6yPyAqEdK9lMdglST+EZhk=";
+    src = pkgs.fetchFromGitLab {
+      owner = "sdm845-mainline";
+      repo = "linux";
+      rev = "sdm845-6.16.7-r0";
+      hash = "sha256-XYlXuzapuesiTpvquuz0b6yPyAqEdK9lMdglST+EZhk=";
+    };
+
+    extraNativeBuildInputs = [ pkgs.zstd ];
+    kernelPatches = [ ];
+    ignoreConfigErrors = true;
   };
-
-  isModular = true;
-  isCompressed = "gz";
-  nativeBuildInputs = [ pkgs.zstd ];
-}
+in
+kernel.overrideAttrs (oldAttrs: {
+  postInstall = (oldAttrs.postInstall or "") + ''
+    if [ -f "$buildRoot/arch/arm64/boot/Image.gz" ]; then
+      cp -v "$buildRoot/arch/arm64/boot/Image.gz" "$out/"
+    fi
+  '';
+  passthru = (oldAttrs.passthru or { }) // {
+    file = "Image.gz";
+    isQcdt = false;
+    isExynosDT = false;
+  };
+})
