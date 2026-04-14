@@ -407,5 +407,30 @@ in
         LD_LIBRARY_PATH = "${extraUtils}/lib";
         PATH = "${extraUtils}/bin";
       };
+    } // mkIf (!config.mobile.boot.stage-1.enable) {
+      boot.initrd.enable = true;
+      boot.initrd.allowMissingModules = true;
+
+      boot.initrd.extraUdevRulesCommands = let 
+        udev = config.systemd.package; 
+      in 
+      ''
+      cp -v ${udev}/lib/udev/rules.d/60-input-id.rules $out/
+      cp -v ${udev}/lib/udev/rules.d/60-persistent-input.rules $out/
+      cp -v ${udev}/lib/udev/rules.d/70-touchpad.rules $out/
+      cp -v ${extraUdevRules} $out/99-extra.rules
+      '';
+
+      system.build.initialRamdiskSecretAppender =
+        pkgs.writeScriptBin "append-initrd-secrets" "#!${pkgs.coreutils}/bin/true"
+      ;
+
+      mobile.outputs = {
+        inherit
+          extraUtils
+          initrd-meta
+        ;
+        initrd = "${config.system.build.initialRamdisk}/initrd";
+      };
     };
   }
