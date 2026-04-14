@@ -421,10 +421,6 @@ in
       cp -v ${extraUdevRules} $out/99-extra.rules
       '';
 
-      system.build.initialRamdiskSecretAppender =
-        pkgs.writeScriptBin "append-initrd-secrets" "#!${pkgs.coreutils}/bin/true"
-      ;
-
       mobile.outputs = {
         inherit
           extraUtils

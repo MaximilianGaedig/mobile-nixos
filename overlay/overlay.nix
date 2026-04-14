@@ -67,8 +67,6 @@ in
   voltd81 = callPackage ./81voltd { };
   bootmac = callPackage ./bootmac { };
   swclock-offset = callPackage ./swclock-offset { };
-  # libssc uses nixpkgs version (0.2.2) instead of custom overlay
-  libnfc-nci = callPackage ./libnfc-nci { };
 
   lk2ndMsm8953 = callPackage ./lk2nd/msm8953.nix { };
 

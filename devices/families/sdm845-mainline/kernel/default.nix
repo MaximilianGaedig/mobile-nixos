@@ -1,6 +1,7 @@
 {
   mobile-nixos,
   fetchFromGitLab,
+  pkgs,
   ...
 }:
 
@@ -17,4 +18,5 @@ mobile-nixos.kernel-builder {
 
   isModular = true;
   isCompressed = "gz";
+  nativeBuildInputs = [ pkgs.zstd ];
 }

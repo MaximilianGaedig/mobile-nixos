@@ -20,9 +20,7 @@ in
         This enables the I2C and GPIO configuration for the NXP NFC controller.
         NFC hardware is already enabled in the sdm845-mainline kernel.
 
-        Note: Userspace tools (libnfc-nci) are not yet packaged due to upstream
-        code quality issues. NFC hardware will work but userspace applications
-        will need to be installed manually.
+        This also installs the libnfc-nci userspace tools.
       '';
     };
   };
@@ -35,8 +33,6 @@ in
       "nci_i2c"
     ];
 
-    # Note: libnfc-nci userspace tools are not yet packaged
-    # See: https://github.com/NXPNFCLinux/linux_libnfc-nci
-    # environment.systemPackages = [ pkgs.libnfc-nci ];
+    environment.systemPackages = [ pkgs.libnfc-nci ];
   };
 }
