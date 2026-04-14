@@ -15,6 +15,6 @@ mobile-nixos.kernel-builder {
     hash = "sha256-XYlXuzapuesiTpvquuz0b6yPyAqEdK9lMdglST+EZhk=";
   };
 
-  isModular = false;
+  isModular = true;
   isCompressed = "gz";
 }

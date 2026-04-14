@@ -76,6 +76,16 @@
     "rmi_core"
     "rmi_i2c"
     "qcom_spmi_haptics"
+    # Modem
+    "qrtr"
+    "qrtr_smd"
+    "qcom_qmi_helpers"
+    "mhi"
+    "mhi_wwan_ctrl"
+    "mhi_net"
+    # Camera
+    "camss"
+    "video_qcom_camss"
   ];
 
   services.udev.extraRules = ''

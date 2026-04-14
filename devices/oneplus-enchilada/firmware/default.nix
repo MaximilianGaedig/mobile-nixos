@@ -19,10 +19,16 @@ runCommand "oneplus-sdm845-firmware"
   }
   ''
     mkdir -p $out/lib/firmware
-    cp -r $baseFw/lib/firmware/* $out/lib/firmware/
-    chmod +w -R $out
+    cp -r --no-preserve=mode $baseFw/lib/firmware/* $out/lib/firmware/
+
+    mkdir -p $out/lib/firmware/qcom/sdm845/OnePlus
+
+    ln -s ../oneplus6 $out/lib/firmware/qcom/sdm845/OnePlus/enchilada
+    ln -s ../oneplus6 $out/lib/firmware/qcom/sdm845/OnePlus/fajita
 
     mkdir -p $out/usr/share/qcom/sdm845/OnePlus/oneplus6
-    cp -r $baseFw/usr/share/qcom/sdm845/OnePlus/oneplus6/* $out/usr/share/qcom/sdm845/OnePlus/oneplus6/
-    chmod +w -R $out
-  ''
+    cp -r --no-preserve=mode $baseFw/usr/share/qcom/sdm845/OnePlus/oneplus6/* $out/usr/share/qcom/sdm845/OnePlus/oneplus6/
+    
+    ln -s oneplus6 $out/usr/share/qcom/sdm845/OnePlus/fajita
+    ln -s oneplus6 $out/usr/share/qcom/sdm845/OnePlus/enchilada
+    ''
