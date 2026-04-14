@@ -248,6 +248,7 @@ let
           libmpc
           mpfr
           python3
+          buildPackages.kmod
         ]
         ++ optional (platform.linux-kernel.target == "uImage") buildPackages.ubootTools
         ++ optional (lib.versionAtLeast version "4.14" && lib.versionOlder version "5.8") libelf
