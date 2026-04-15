@@ -83,8 +83,10 @@
   };
 
   # Stage-2 services
-  # watchdog-kick disabled - causes "watchdog did not stop" errors on enchilada
-  # services.watchdog-kick.enable = lib.mkDefault true;
+  # Disable systemd PID 1 watchdog so watchdog-kick can manage it until late shutdown
+  systemd.settings.Manager.RuntimeWatchdogSec = lib.mkForce "0";
+  systemd.settings.Manager.RebootWatchdogSec = lib.mkForce "0";
+  services.watchdog-kick.enable = lib.mkDefault true;
   services.shutdown-clear-rtc-wakealarm.enable = lib.mkDefault true;
 
   # Enable ttyescape for emergency TTY access
