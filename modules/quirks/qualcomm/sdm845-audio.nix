@@ -13,7 +13,7 @@ let
     #!${pkgs.runtimeShell}
 
     # dbus-monitor is run as a child process to this script. Kill child process too when the script terminates.
-    trap 'pkill -9 -P $$ && exit 0' INT TERM
+    trap '${pkgs.procps}/bin/pkill -9 -P $$ && exit 0' INT TERM
 
     interface=org.freedesktop.ModemManager1.Call
     member=StateChanged
@@ -27,7 +27,7 @@ let
             echo "Call Started"
 
             # Unload module-suspend-on-idle when call begins
-            pidof pulseaudio && ${pkgs.pulseaudio}/bin/pactl unload-module module-suspend-on-idle
+            ${pkgs.procps}/bin/pidof pulseaudio && ${pkgs.pulseaudio}/bin/pactl unload-module module-suspend-on-idle
 
             # With Wireplumber audio, the Pulseaudio
             # compatibility layer doesn't support
@@ -40,10 +40,10 @@ let
 
           if [ "$state" -eq '7' ]; then
             echo "Call Ended"
-            killall -9 pw-loopback &
+            ${pkgs.psmisc}/bin/killall -9 pw-loopback &
 
             # Reload module-suspend-on-idle after call ends
-            pidof pulseaudio && ${pkgs.pulseaudio}/bin/pactl load-module module-suspend-on-idle
+            ${pkgs.procps}/bin/pidof pulseaudio && ${pkgs.pulseaudio}/bin/pactl load-module module-suspend-on-idle
           fi
         fi
       done &
@@ -112,10 +112,17 @@ in
         };
       };
 
+    };
+
+    systemd.user.services = {
       call-audio-idle-suspend-workaround = mkIf cfg.enableCallAudioWorkaround {
         description = "Prevent audio suspension during phone calls";
-        wantedBy = [ "multi-user.target" ];
-        after = [ "ModemManager.service" ];
+        wantedBy = [ "default.target" ];
+        after = [
+          "ModemManager.service"
+          "pipewire.service"
+          "wireplumber.service"
+        ];
         serviceConfig = {
           ExecStart = "${callAudioWorkaround}/bin/call-audio-idle-suspend-workaround";
           Restart = "always";
