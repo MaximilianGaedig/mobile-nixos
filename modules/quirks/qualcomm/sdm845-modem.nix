@@ -104,7 +104,7 @@ in
         after = [ "qrtr-ns.service" ];
         serviceConfig = {
           # https://github.com/andersson/rmtfs/blob/7a5ae7e0a57be3e09e0256b51b9075ee6b860322/rmtfs.c#L507-L541
-          ExecStart = "${pkgs.rmtfs}/bin/rmtfs -s -r ${
+          ExecStart = "${pkgs.rmtfs}/bin/rmtfs -s -r -v ${
             if rmtfsReadsPartition then "-P" else "-o /run/current-system/sw/share/uncompressed-firmware/rmtfs"
           }";
           Restart = "always";
