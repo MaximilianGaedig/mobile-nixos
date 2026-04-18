@@ -13,6 +13,8 @@ stdenv.mkDerivation {
     hash = "sha256-00KOjdkwcAER261lleSl7OVDEAEbDyW9MWxDd0GI8KA=";
   };
 
+  patches = [./0001-fix-request-for-unknown-partition-on-oneplus-6.patch ];
+
   installFlags = [ "prefix=$(out)" ];
 
   meta = with lib; {

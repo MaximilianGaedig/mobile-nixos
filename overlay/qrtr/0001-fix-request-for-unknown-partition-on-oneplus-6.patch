@@ -1,0 +1,27 @@
+From c03bcd75bab9f272fc495e03dd5326d17ea69fee Mon Sep 17 00:00:00 2001
+From: Maximilian Gaedig <mg@maximiliangaedig.com>
+Date: Sat, 18 Apr 2026 23:06:29 +0200
+Subject: [PATCH] fix: "request for unknown partition" on oneplus 6
+
+---
+ storage.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/storage.c b/storage.c
+index 107b296..5c88f86 100644
+--- a/storage.c
++++ b/storage.c
+@@ -42,6 +42,10 @@ static const struct partition partition_table[] = {
+ 	{ "/boot/modem_fsc", "modem_fsc", "fsc" },
+ 	{ "/boot/modem_fsg", "modem_fsg", "fsg" },
+ 	{ "/boot/modem_tunning", "modem_tunning", "tunning" },
++	{ "/boot/modem_fsg_oem_1", "modem_fsg", "fsg" }, 
++	{ "/boot/modem_fsg_oem_2", "modem_fsg", "fsg" },
++	{ "/oem/nvbk/static", "static", "oem_stanvbk" },
++	{ "/oem/nvbk/dynamic", "dynamic", "oem_dycnvbk" },
+ 	{}
+ };
+ 
+-- 
+2.53.0
+
