@@ -40,7 +40,7 @@
   };
 
   # Disable services not needed for enchilada
-  systemd.services.bootmac.enable = lib.mkDefault false; # MAC already set by kernel
+  systemd.services.bootmac.enable = lib.mkDefault true; # MAC already set by kernel
   systemd.services.swclock-offset.enable = lib.mkDefault false; # Has writable RTC
 
   # Sensors using nixpkgs packages (libssc 0.2.2, iio-sensor-proxy 3.8)

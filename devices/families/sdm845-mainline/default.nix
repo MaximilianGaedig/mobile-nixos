@@ -5,6 +5,24 @@
   ...
 }:
 
+let 
+  shrunken-firmware = (pkgs.runCommand "initrd-firmware" { } ''
+      mkdir $out
+      cp -vrf ${config.mobile.device.firmware}/* $out
+      chmod -R +w $out
+      # Big file, fills and breaks stage-1
+      find $out/lib/firmware/qcom/sdm845 -name "modem.mbn" -delete -print
+
+      # Copy extra a630 firmware from linux-firmware
+      cp -vf ${pkgs.linux-firmware}/lib/firmware/qcom/{a630_sqe.fw,a630_gmu.bin} $out/lib/firmware/qcom
+    '');
+      allFirmwareFiles = let
+    suffix = "/lib/firmware/";
+    prefixLen = builtins.stringLength "${shrunken-firmware}${suffix}";
+    allFiles = pkgs.lib.filesystem.listFilesRecursive "${shrunken-firmware}${suffix}";
+  in
+    map (f: builtins.substring prefixLen (-1) (toString f)) allFiles;
+in
 {
   imports = [
     ./sound.nix
@@ -37,6 +55,17 @@
       cp -vf ${pkgs.linux-firmware}/lib/firmware/qcom/{a630_sqe.fw,a630_gmu.bin} $out/lib/firmware/qcom
     '')
   ];
+  hardware.firmware = lib.mkBefore [ 
+shrunken-firmware
+ ];
+  boot.initrd.extraFirmwarePaths = allFirmwareFiles;
+
+  #   [
+  #   "qcom/sdm845/oneplus6/venus.mbn"
+  #   "qcom/a630_sqe.fw"
+  #   ""
+  # ];
+
 
   mobile.system.type = "android";
   mobile.system.android = {
@@ -85,7 +114,8 @@
     "mhi_net"
     # Camera
     "camss"
-    "video_qcom_camss"
+    "qcom_camss"
+    "qcom_venus"
   ];
 
   services.udev.extraRules = ''
