@@ -96,7 +96,31 @@ in
   # All that follows will have to be cleaned and then upstreamed.
   #
 
-  # No such fixes as of now, this comment is merely a placeholder to keep the general structure.
+  # Version bumps ahead of current nixpkgs pin (needed for Qualcomm modem support)
+  # WARN: triggers mass rebuild through GNOME stack
+  # libqmi = super.libqmi.overrideAttrs (oldAttrs: {
+  #   version = "1.38.0";
+  #   src = final.fetchFromGitLab {
+  #     domain = "gitlab.freedesktop.org";
+  #     owner = "mobile-broadband";
+  #     repo = "libqmi";
+  #     rev = "1.38.0";
+  #     sha256 = "sha256-bJbNfnKVJuhy/6EJgu5b7t6vxNTex/5heTzMzTzVREw=";
+  #   };
+  #   mesonFlags = (oldAttrs.mesonFlags or []) ++ [ "-Dgtk_doc=false" ];
+  #   outputs = [ "out" "dev" ];
+  # });
+
+  iio-sensor-proxy = super.iio-sensor-proxy.overrideAttrs (oldAttrs: {
+    version = "3.9";
+    src = final.fetchFromGitLab {
+      domain = "gitlab.freedesktop.org";
+      owner = "hadess";
+      repo = "iio-sensor-proxy";
+      rev = "3.9";
+      sha256 = "sha256-2N/4Fp6QtAhgEzX9cHEDJhFtRsyrtZ80I2jdHdeEmxA=";
+    };
+  });
 
   # Things specific to mobile-nixos.
   # Not necessarily internals, but they probably won't go into <nixpkgs>.

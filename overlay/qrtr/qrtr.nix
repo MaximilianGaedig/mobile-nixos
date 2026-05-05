@@ -1,21 +1,26 @@
-{ stdenv, lib, fetchFromGitHub }:
+{ stdenv, lib, fetchFromGitHub, meson, ninja, linuxHeaders }:
 
-stdenv.mkDerivation {
+stdenv.mkDerivation rec {
   pname = "qrtr";
-  version = "unstable-2020-12-07";
+  version = "1.2";
 
   src = fetchFromGitHub {
-    owner = "andersson";
+    owner = "linux-msm";
     repo = "qrtr";
-    rev = "9dc7a88548c27983e06465d3fbba2ba27d4bc050";
-    hash = "sha256-eJyErfLpIv4ndX2MPtjLTOQXrcWugQo/03Kz4S8S0xw=";
+    rev = "v${version}";
+    hash = "sha256-plVPR3BKtMLSVgTK8TPFbt5vuo9ZovEGz6qJzUZ33G4=";
   };
 
-  installFlags = [ "prefix=$(out)" ];
+  nativeBuildInputs = [ meson ninja ];
+  buildInputs = [ linuxHeaders ];
+
+  mesonFlags = [
+    "-Dsystemd-service=disabled"
+  ];
 
   meta = with lib; {
-    description = "QMI IDL compiler";
-    homepage = "https://github.com/andersson/qrtr";
+    description = "Userspace reference for net/qrtr in the Linux kernel";
+    homepage = "https://github.com/linux-msm/qrtr";
     license = licenses.bsd3;
     platforms = platforms.aarch64;
   };

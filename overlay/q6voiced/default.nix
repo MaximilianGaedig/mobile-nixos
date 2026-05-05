@@ -1,49 +1,40 @@
 {
   lib,
   fetchFromGitLab,
-  tinyalsa,
+  alsa-lib,
   dbus,
   stdenv,
   pkg-config,
+  meson,
+  ninja,
 }:
 
 stdenv.mkDerivation rec {
   pname = "q6voiced";
-  version = "0_git20210408";
-  _commit = "a75518e1ddf44971b1181e12c328dd250b62962a";
+  version = "0.2.1";
 
   src = fetchFromGitLab {
+    domain = "gitlab.postmarketos.org";
     owner = "postmarketOS";
     repo = "q6voiced";
-    rev = _commit;
-    sha256 = "sha256-IZOWjOGDUwyBbIxSTIi27UvwKLB6dLvwvcaQn7Jkv4Y=";
+    rev = version;
+    sha256 = "0130s2iqywrbxgi3mmxxpic7l5kfhb7mvwpykzjyxx2icn065hvz";
   };
 
   buildInputs = [
-    tinyalsa
+    alsa-lib
     dbus
   ];
 
   nativeBuildInputs = [
     pkg-config
+    meson
+    ninja
   ];
 
-  buildPhase = ''
-    export DBUS_CFLAGS=$(pkg-config --cflags dbus-1)
-    export DBUS_LIBS=$(pkg-config --libs dbus-1)
-    gcc -o q6voiced q6voiced.c \
-      $DBUS_CFLAGS \
-      $DBUS_LIBS \
-      -L${tinyalsa}/lib -ltinyalsa
-  '';
-
-  installPhase = ''
-    install -Dm755 q6voiced $out/bin/q6voiced
-  '';
-
   meta = with lib; {
-    description = "Enable q6voice audio when call is performed with oFono/ModemManager";
-    homepage = "https://github.com/msm8916-mainline/linux";
+    description = "Userspace QDSP6 voice driver daemon listening on oFono/ModemManager";
+    homepage = "https://gitlab.postmarketos.org/postmarketOS/q6voiced/";
     license = licenses.mit;
     platforms = platforms.aarch64;
   };
