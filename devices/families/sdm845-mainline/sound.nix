@@ -11,8 +11,8 @@
             name = "sdm845-alsa-ucm";
             owner = "sdm845-mainline";
             repo = "alsa-ucm-conf";
-            rev = "621c71fd5f5742c60d38766ebb2d1bd3b863a2a4"; # master
-            sha256 = "sha256-CgAPg0UUAJUE1gD59l2GNDx3h9crAato6O/dDJpRwiY=";
+            rev = "de81252f28465fb76e2aa58eb9733b88de2076ea"; # sdm845-phones
+            sha256 = "sha256-bzkAF5qK7pE9ZMrjBYtzbWIhHgOTBic9zSDydaLFNsg=";
           };
         } ''
           mkdir -p $out/share/

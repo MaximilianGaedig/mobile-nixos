@@ -186,8 +186,6 @@ in
 
     # Run the boot orchestrator after mounting root filesystem
     boot.initrd.postMountCommands = ''
-      echo MOBILE_NIXOS_BOOT!!!!!!!!!!!!!
-      sleep 5
       ${mobileNixosBoot}
     '';
 

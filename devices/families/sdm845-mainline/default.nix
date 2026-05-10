@@ -5,8 +5,9 @@
   ...
 }:
 
-let 
-  shrunken-firmware = (pkgs.runCommand "initrd-firmware" { } ''
+let
+  shrunken-firmware = (
+    pkgs.runCommand "initrd-firmware" { } ''
       mkdir $out
       cp -vrf ${config.mobile.device.firmware}/* $out
       chmod -R +w $out
@@ -15,12 +16,14 @@ let
 
       # Copy extra a630 firmware from linux-firmware
       cp -vf ${pkgs.linux-firmware}/lib/firmware/qcom/{a630_sqe.fw,a630_gmu.bin} $out/lib/firmware/qcom
-    '');
-      allFirmwareFiles = let
-    suffix = "/lib/firmware/";
-    prefixLen = builtins.stringLength "${shrunken-firmware}${suffix}";
-    allFiles = pkgs.lib.filesystem.listFilesRecursive "${shrunken-firmware}${suffix}";
-  in
+    ''
+  );
+  allFirmwareFiles =
+    let
+      suffix = "/lib/firmware/";
+      prefixLen = builtins.stringLength "${shrunken-firmware}${suffix}";
+      allFiles = pkgs.lib.filesystem.listFilesRecursive "${shrunken-firmware}${suffix}";
+    in
     map (f: builtins.substring prefixLen (-1) (toString f)) allFiles;
 in
 {
@@ -55,9 +58,9 @@ in
       cp -vf ${pkgs.linux-firmware}/lib/firmware/qcom/{a630_sqe.fw,a630_gmu.bin} $out/lib/firmware/qcom
     '')
   ];
-  hardware.firmware = lib.mkBefore [ 
-shrunken-firmware
- ];
+  hardware.firmware = lib.mkBefore [
+    shrunken-firmware
+  ];
   boot.initrd.extraFirmwarePaths = allFirmwareFiles;
 
   #   [
@@ -65,7 +68,6 @@ shrunken-firmware
   #   "qcom/a630_sqe.fw"
   #   ""
   # ];
-
 
   mobile.system.type = "android";
   mobile.system.android = {
@@ -105,17 +107,6 @@ shrunken-firmware
     "rmi_core"
     "rmi_i2c"
     "qcom_spmi_haptics"
-    # Modem
-    "qrtr"
-    "qrtr_smd"
-    "qcom_qmi_helpers"
-    "mhi"
-    "mhi_wwan_ctrl"
-    "mhi_net"
-    # Camera
-    "camss"
-    "qcom_camss"
-    "qcom_venus"
   ];
 
   services.udev.extraRules = ''

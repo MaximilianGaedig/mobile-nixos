@@ -18,16 +18,6 @@ in
   };
 
   config = mkIf cfg.enable {
-    # Install ttyescape and its dependencies
-    environment.systemPackages = with pkgs; [
-      ttyescape
-      hkdm
-      buffyboard
-      terminus_font
-      kbd
-    ];
-
-    # Enable systemd service for ttyescape
     systemd.services.ttyescape = {
       description = "TTY escape daemon";
       after = [

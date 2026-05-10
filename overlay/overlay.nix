@@ -29,7 +29,6 @@ in
   ttyescape = callPackage ./ttyescape { };
   ufdt-apply-overlay = callPackage ./ufdt-apply-overlay { };
   unl0kr = callPackage ./unl0kr { };
-  watchdog-kick = callPackage ./watchdog-kick { };
 
   # Extra "libs"
   mkExtraUtils = import ./lib/extra-utils.nix {

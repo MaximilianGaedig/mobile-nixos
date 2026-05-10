@@ -47,13 +47,14 @@ unless FILE
   exit 1
 end
 
-arg =
-  # Is the device a path?
-  if DEVICE.match(%r{/})
-    ["--arg", "device", DEVICE]
-  else
-    ["--argstr", "device", DEVICE]
-  end
+arg = ["--arg", "device", "oneplus-enchilada"]
+# arg =
+#   # Is the device a path?
+#   if DEVICE.match(%r{/})
+#     ["--arg", "device", DEVICE]
+#   else
+#     ["--argstr", "device", DEVICE]
+#   end
 
 Dir.chdir(ROOT) do
   tool = File.join(`#{[

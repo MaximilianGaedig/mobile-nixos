@@ -51,7 +51,7 @@ in
       '';
     };
   };
-  config = mkIf (anyCompatible) {
+  config = mkIf anyCompatible {
     # Makes platform-specific firmware files available in an uncompressed form at:
     # /run/current-system/sw/share/uncompressed-firmware/qcom/sdm845/
     # This is used by userspace components unaware of the possible xz compression.
@@ -62,7 +62,6 @@ in
       (pkgs.callPackage
         (
           {
-            lib,
             runCommand,
             buildEnv,
             firmwareFilesList,
@@ -95,7 +94,13 @@ in
           firmwareFilesList = lib.flatten options.hardware.firmware.definitions;
         }
       )
-    ];
+
+    ]
+    ++ lib.optional (pkgs ? bootmac) pkgs.bootmac;
+
+    systemd.packages = mkIf (pkgs ? bootmac) [ pkgs.bootmac ];
+
+    services.udev.packages = mkIf (pkgs ? bootmac) [ pkgs.bootmac ];
 
     systemd.services = {
       rmtfs = {
@@ -173,22 +178,31 @@ in
         };
       };
 
-      bootmac = mkIf (pkgs ? bootmac) {
-        description = "Configure WiFi MAC address at boot";
-        wantedBy = [ "multi-user.target" ];
-        path = [ pkgs.util-linux ]; # For logger command
-        serviceConfig = {
-          ExecStart = "${pkgs.bootmac}/bin/bootmac";
-          RemainAfterExit = true;
-        };
-      };
-
       swclock-offset = mkIf (pkgs ? swclock-offset) {
         description = "Software clock offset for non-writable RTC";
         wantedBy = [ "multi-user.target" ];
         serviceConfig = {
-          ExecStart = "${pkgs.swclock-offset}/bin/swclock-offset";
+          ExecStart = "${pkgs.swclock-offset}/bin/swclock-offset-boot";
           RemainAfterExit = true;
+        };
+      };
+
+      swclock-offset-shutdown = mkIf (pkgs ? swclock-offset) {
+        description = "Save software clock offset at shutdown";
+        before = [
+          "shutdown.target"
+          "reboot.target"
+          "halt.target"
+        ];
+        wantedBy = [
+          "shutdown.target"
+          "reboot.target"
+          "halt.target"
+        ];
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          ExecStop = "${pkgs.swclock-offset}/bin/swclock-offset-shutdown";
         };
       };
 

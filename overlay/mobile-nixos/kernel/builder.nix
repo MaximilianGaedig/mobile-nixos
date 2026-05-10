@@ -681,12 +681,11 @@ let
                   # Hot fixes pkg-config use.
                   if [ -e scripts/kconfig/nconf-cfg.sh ]; then
                     # Replace the script with a hardcoded equivalent result.
-                    # The script echoes values that are sourced (.) in a Makefile.
+                    # The script writes to files named in $1 (cflags) and $2 (libs).
                     cat ${writeShellScript "nconf-cfg.sh" ''
                       export PKG_CONFIG_PATH="${buildPackages.ncurses6.dev}/lib/pkgconfig"
-                      PKGS="ncursesw menuw panelw"
-                      echo cflags=\"$(pkg-config --cflags $PKGS)\"
-                      echo libs=\"-L $(pkg-config --variable=libdir ncursesw) $(pkg-config --libs $PKGS)\"
+                      pkg-config --cflags ncursesw menuw panelw > "$1"
+                      pkg-config --libs ncursesw menuw panelw > "$2"
                     ''} > scripts/kconfig/nconf-cfg.sh
                   fi
 

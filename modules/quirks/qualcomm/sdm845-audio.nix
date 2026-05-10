@@ -87,10 +87,14 @@ in
 
   config = mkIf cfg.enable {
     systemd.services = {
-      hexagonrpcd = {
-        description = "Hexagon DSP daemon for FastRPC";
+      hexagonrpcd-adsp = {
+        description = "Hexagon DSP daemon for ADSP (Audio DSP)";
         wantedBy = [ "multi-user.target" ];
-        after = [ "remote-fs.target" ];
+        bindsTo = [ "dev-fastrpc\\x2dadsp.device" ];
+        after = [
+          "dev-fastrpc\\x2dadsp.device"
+          "remote-fs.target"
+        ];
         serviceConfig = {
           ExecStart = "${pkgs.hexagonrpc}/bin/hexagonrpcd -f /dev/fastrpc-adsp -s -R ${cfg.hexagonrpc-fw-dir}";
           Restart = "always";

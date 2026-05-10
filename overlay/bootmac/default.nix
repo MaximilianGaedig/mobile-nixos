@@ -5,14 +5,15 @@
   meson,
   ninja,
   pkg-config,
-  systemd,
   gawk,
   bluez,
   iproute2,
   util-linux,
   makeWrapper,
+  coreutils,
+  gnugrep,
+  gnused,
 }:
-
 stdenv.mkDerivation rec {
   pname = "bootmac";
   version = "0.7.1";
@@ -32,17 +33,15 @@ stdenv.mkDerivation rec {
     makeWrapper
   ];
 
-  buildInputs = [
-    systemd
+  mesonFlags = [
+    "-Dsystemd_units=true"
   ];
 
   postPatch = ''
     substituteInPlace bootmac-bluetooth.rules bootmac-wifi.rules systemd/bootmac@.service \
-      --replace-quiet "/usr/bin/bootmac" "$out/bin/bootmac" \
-      --replace-quiet "/bin/bootmac" "$out/bin/bootmac"
+      --replace-quiet "/usr/bin/bootmac" "$out/bin/bootmac"
   '';
 
-  # Wrap the executable after Meson installs it
   postFixup = ''
     wrapProgram $out/bin/bootmac \
       --prefix PATH : ${
@@ -51,6 +50,9 @@ stdenv.mkDerivation rec {
           bluez
           iproute2
           util-linux
+          coreutils
+          gnugrep
+          gnused
         ]
       }
   '';

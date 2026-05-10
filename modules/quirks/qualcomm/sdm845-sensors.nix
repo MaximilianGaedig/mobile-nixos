@@ -39,6 +39,11 @@ in
       default = "oneplus6";
       description = "Device name for sensor configuration";
     };
+    hexagonrpcFwDir = mkOption {
+      type = types.str;
+      default = "/usr/share/qcom/sdm845/OnePlus/oneplus6";
+      description = "Root directory of sensor calibration firmware files served by hexagonrpcd";
+    };
   };
 
   config = mkIf cfg.enable {
@@ -47,14 +52,24 @@ in
       pkgs.iio-sensor-proxy
     ];
 
-    systemd.services.iio-sensor-proxy = {
-      description = "IIO sensor proxy daemon";
+    systemd.packages = [ pkgs.iio-sensor-proxy ];
+
+    systemd.services.hexagonrpcd-sdsp = {
+      description = "Hexagon DSP daemon for SDSP (Sensor DSP)";
       wantedBy = [ "multi-user.target" ];
+      bindsTo = [ "dev-fastrpc\\x2dsdsp.device" ];
+      after = [ "dev-fastrpc\\x2dsdsp.device" ];
       serviceConfig = {
-        ExecStart = "${pkgs.iio-sensor-proxy}/bin/iio-sensor-proxy";
+        ExecStart = "${pkgs.hexagonrpc}/bin/hexagonrpcd -f /dev/fastrpc-sdsp -d sdsp -s -R ${cfg.hexagonrpcFwDir}";
         Restart = "always";
         RestartSec = "5";
       };
+    };
+
+    # iio-sensor-proxy needs hexagonrpcd-sdsp to be ready
+    systemd.services.iio-sensor-proxy = {
+      after = [ "hexagonrpcd-sdsp.service" ];
+      requires = [ "hexagonrpcd-sdsp.service" ];
     };
 
     services.udev.extraHwdb = ''

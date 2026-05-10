@@ -13,7 +13,7 @@
   jq,
   libnotify,
   mpc,
-  mpv,
+  # mpv,
   ncurses,
   networkmanager,
   procps,
@@ -75,7 +75,7 @@ stdenv.mkDerivation rec {
               jq
               libnotify
               mpc
-              mpv
+              # mpv
               ncurses
               networkmanager
               procps

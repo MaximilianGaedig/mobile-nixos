@@ -21,6 +21,10 @@ runCommand "oneplus-sdm845-firmware"
     mkdir -p $out/lib/firmware
     cp -r --no-preserve=mode $baseFw/lib/firmware/* $out/lib/firmware/
 
+    # qca/crbtfw21.tlv from linux-firmware is incompatible with OnePlus 6
+    mkdir -p $out/lib/firmware/qca
+    cp -f $baseFw/lib/firmware/postmarketos/qca/crbtfw21.tlv $out/lib/firmware/qca/crbtfw21.tlv
+
     mkdir -p $out/lib/firmware/qcom/sdm845/OnePlus
 
     ln -s ../oneplus6 $out/lib/firmware/qcom/sdm845/OnePlus/enchilada
@@ -31,4 +35,4 @@ runCommand "oneplus-sdm845-firmware"
     
     ln -s oneplus6 $out/usr/share/qcom/sdm845/OnePlus/fajita
     ln -s oneplus6 $out/usr/share/qcom/sdm845/OnePlus/enchilada
-    ''
+  ''

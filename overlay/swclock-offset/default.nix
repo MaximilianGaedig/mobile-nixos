@@ -15,9 +15,15 @@ stdenv.mkDerivation rec {
     sha256 = "sha256-Qqvu4GH016pz8+iMDECE2zXCPKhDPHo3CPzPPgJhITw=";
   };
 
+  postPatch = ''
+    substituteInPlace Makefile \
+      --replace-fail '$(DESTDIR)/usr/bin' '$(DESTDIR)$(PREFIX)/bin' \
+      --replace-fail '$(DESTDIR)/usr/lib/systemd' '$(DESTDIR)$(PREFIX)/lib/systemd' \
+      --replace-fail '$(DESTDIR)/etc/init.d' '$(DESTDIR)$(PREFIX)/etc/init.d'
+  '';
+
   makeFlags = [
-    "DESTDIR=$(out)"
-    "PREFIX="
+    "PREFIX=$(out)"
   ];
 
   installTargets = "install";

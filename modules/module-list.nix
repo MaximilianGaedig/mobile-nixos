@@ -26,7 +26,6 @@
   ./hardware.nix
   ./initrd-base.nix
   ./initrd-boot-gui.nix
-  ./initrd-buffyboard.nix
   ./initrd-fail.nix
   ./initrd-fbterm.nix
   ./initrd-firmware.nix
@@ -58,7 +57,6 @@
   ./service-shutdown-clear-rtc-wakealarm.nix
   ./service-fbkeyboard.nix
   ./service-ttyescape.nix
-  ./service-watchdog-kick.nix
   ./shared-rootfs.nix
   ./stage-0.nix
   ./system-build.nix
