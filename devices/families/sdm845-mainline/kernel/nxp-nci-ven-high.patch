@@ -1,0 +1,11 @@
+--- a/drivers/nfc/nxp-nci/i2c.c
++++ b/drivers/nfc/nxp-nci/i2c.c
+@@ -286,7 +286,7 @@ static int nxp_nci_i2c_probe(struct i2c_client *client)
+ 	if (!phy)
+ 		return -ENOMEM;
+ 
+-	phy->gpiod_en = devm_gpiod_get(dev, "enable", GPIOD_OUT_LOW);
++	phy->gpiod_en = devm_gpiod_get(dev, "enable", GPIOD_OUT_HIGH);
+ 	if (IS_ERR(phy->gpiod_en)) {
+ 		r = PTR_ERR(phy->gpiod_en);
+ 		return r;

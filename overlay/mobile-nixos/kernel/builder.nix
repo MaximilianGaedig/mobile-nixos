@@ -85,7 +85,13 @@ let
     optional
     optionalString
     ;
-  platform = stdenv.hostPlatform;
+  linuxKernelPlatform =
+    if builtins.hasAttr "linux-kernel" stdenv.hostPlatform
+    then stdenv.hostPlatform."linux-kernel"
+    else {
+      target = if stdenv.hostPlatform.isAarch64 then "Image" else "bzImage";
+    };
+  platform = stdenv.hostPlatform // { "linux-kernel" = linuxKernelPlatform; };
 
   maybeString = str: optionalString (str != null) str;
 in

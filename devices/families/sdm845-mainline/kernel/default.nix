@@ -16,6 +16,8 @@ mobile-nixos.kernel-builder {
     hash = "sha256-XYlXuzapuesiTpvquuz0b6yPyAqEdK9lMdglST+EZhk=";
   };
 
+  patches = [ ./nxp-nci-ven-high.patch ];
+
   isModular = true;
   isCompressed = "gz";
   nativeBuildInputs = [ pkgs.zstd ];

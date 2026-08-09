@@ -17,22 +17,29 @@ in
       description = ''
         Enable NFC support for SDM845 devices (OnePlus 6/6T).
 
-        This enables the I2C and GPIO configuration for the NXP NFC controller.
-        NFC hardware is already enabled in the sdm845-mainline kernel.
-
-        This also installs the libnfc-nci userspace tools.
+        This loads the NXP NCI I2C kernel driver and enables the neard
+        NFC daemon for tag reading and card emulation.
       '';
     };
   };
 
   config = mkIf cfg.enable {
-    # NFC kernel modules
+    # NXP NCI I2C driver for the PN553 NFC controller
     boot.kernelModules = [
-      "nfcsim"
-      "nci"
-      "nci_i2c"
+      "nxp-nci"
+      "nxp-nci_i2c"
     ];
 
+    # Linux NFC daemon (neard) for standard kernel NFC subsystem support
+    services.neard.enable = true;
+
+    # libnfc-nci with gpiod support for direct userspace I2C/GPIO access
     environment.systemPackages = [ pkgs.libnfc-nci ];
+
+    # Install libnfc-nci configuration files
+    environment.etc."libnfc-nci.conf".source = "${pkgs.libnfc-nci}/etc/libnfc-nci.conf";
+    environment.etc."libnfc-nxp-init.conf".source = "${pkgs.libnfc-nci}/etc/libnfc-nxp-init.conf";
+    environment.etc."libnfc-nxp-pn547.conf".source = "${pkgs.libnfc-nci}/etc/libnfc-nxp-pn547.conf";
+    environment.etc."libnfc-nxp-pn548.conf".source = "${pkgs.libnfc-nci}/etc/libnfc-nxp-pn548.conf";
   };
 }
