@@ -1,0 +1,20 @@
+--- a/drivers/gpu/drm/msm/dsi/dsi_host.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_host.c
+@@ -2571,6 +2571,17 @@
+ 	cfg_hnd->ops->link_clk_disable(msm_host);
+ 	pm_runtime_put(&msm_host->pdev->dev);
+ 
++	/*
++	 * Drop the reference msm_dsi_host_power_on() took to keep the host
++	 * resumed for as long as the display was on. The put above only
++	 * balances the get_sync at the top of this function, which was taken
++	 * to reach the registers; without this one the usage count never
++	 * returns to zero, so the host stays runtime-active with the panel
++	 * disabled and holds its power domain -- and with it the CX rail --
++	 * up for as long as the machine is running.
++	 */
++	pm_runtime_put(&msm_host->pdev->dev);
++
+ 	regulator_bulk_disable(msm_host->cfg_hnd->cfg->num_regulators,
+ 			       msm_host->supplies);
+ 

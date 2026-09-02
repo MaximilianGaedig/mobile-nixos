@@ -1,0 +1,1053 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+/*
+ * Minimal legacy /dev/ion + /dev/qseecom compat shim.
+ *
+ * Purpose: let REAL, unmodified Android vendor binaries (android.hardware.
+ * gatekeeper@1.0-service-qti, libQSEEComAPI.so, etc, pulled verbatim from a
+ * real LineageOS build for this device) run against our modern generic-TEE
+ * kernel driver (drivers/tee/qseecom/core.c), to test empirically whether
+ * Gatekeeper's RPMB failure is a bug in our own from-scratch reimplementation
+ * or a genuine hardware/firmware boundary that the real vendor stack also
+ * hits. Not a general-purpose ION/QSEECOM implementation -- deliberately
+ * narrow, just enough surface for QSEECom_start_app()/QSEECom_send_cmd() to
+ * complete without erroring out at the ioctl level.
+ *
+ * Simplification versus the real downstream driver: SET_MEM_PARAM_REQ's ion
+ * fd is validated (must be one of our own /dev/ion handles) but its backing
+ * memory is not actually used for the SMC data path -- SEND_CMD_REQ bounce-
+ * copies directly from/to whatever user pointers the caller provides via
+ * copy_from_user/copy_to_user into a fresh qcom_tzmem allocation per call,
+ * reusing qcom_scm_qseecom_app_send() (the same primitive our own modern TEE
+ * invoke path uses). This sidesteps needing real physical-address-backed ion
+ * heaps; the real driver requires cmd_req_buf/resp_buf to be valid, mapped
+ * user memory, which copy_from_user/copy_to_user already require regardless
+ * of backing allocator.
+ */
+#include <linux/anon_inodes.h>
+#include <linux/cdev.h>
+#include <linux/clk.h>
+#include <linux/clk-provider.h>
+#include <linux/file.h>
+#include <linux/firmware.h>
+#include <linux/firmware/qcom/qcom_scm.h>
+#include <linux/firmware/qcom/qcom_tzmem.h>
+#include <linux/fs.h>
+#include <linux/miscdevice.h>
+#include <linux/minmax.h>
+#include <linux/mm.h>
+#include <linux/module.h>
+#include <linux/of.h>
+#include <linux/printk.h>
+#include <linux/sizes.h>
+#include <linux/slab.h>
+#include <linux/soc/qcom/mdt_loader.h>
+#include <linux/uaccess.h>
+#include <linux/uio.h>
+
+/*
+ * Real stock qseecom.c explicitly votes for a crypto-engine clock set
+ * (ce_core_clk/ce_clk/ce_bus_clk, its own comment: "if clk_access_cnt is
+ * zero ... the crypto clock was not enabled before sending cmd to tz,
+ * qseecom will enable the clock to avoid service failure") before every
+ * SEND_CMD. This driver's mainline sibling, drivers/tee/qseecom/core.c, has
+ * no clock-voting code at all -- confirmed by direct inspection -- and
+ * clk_summary on this device shows gcc_ce1_clk/_axi_clk/_ahb_clk at
+ * enable_count=0 despite extensive successful-looking QSEECOM traffic.
+ * Simple status/control commands may not touch the crypto engine at all,
+ * but Gatekeeper/Keymaster's actual cryptographic operations plausibly do --
+ * which would explain exactly the pattern observed: those keep failing while
+ * plain polls succeed. Vote for the same clocks here to test that directly.
+ * Looked up via of_clk_get_from_provider() against the GCC node's own
+ * providered indices (dt-bindings/clock/qcom,gcc-sdm845.h) rather than a
+ * devicetree consumer binding, since this driver has no DT node of its own
+ * to attach one to.
+ */
+static struct clk *compat_ce1_clk, *compat_ce1_axi_clk, *compat_ce1_ahb_clk;
+
+#define COMPAT_GCC_CE1_AHB_CLK	9
+#define COMPAT_GCC_CE1_AXI_CLK	10
+#define COMPAT_GCC_CE1_CLK	11
+
+static struct clk *compat_get_gcc_clk(struct device_node *gcc, unsigned int idx)
+{
+	struct of_phandle_args args = { .np = gcc, .args_count = 1, .args = { idx } };
+	struct clk *clk = of_clk_get_from_provider(&args);
+
+	if (IS_ERR(clk)) {
+		pr_err("qseecom_legacy_compat: gcc clock idx=%u lookup failed: %ld\n",
+		       idx, PTR_ERR(clk));
+		return NULL;
+	}
+	if (clk_prepare_enable(clk)) {
+		pr_err("qseecom_legacy_compat: gcc clock idx=%u enable failed\n", idx);
+		clk_put(clk);
+		return NULL;
+	}
+	pr_info("qseecom_legacy_compat: gcc clock idx=%u enabled, rate=%lu\n",
+		idx, clk_get_rate(clk));
+	return clk;
+}
+
+static void compat_ce1_clocks_enable(void)
+{
+	struct device_node *gcc = of_find_compatible_node(NULL, NULL, "qcom,gcc-sdm845");
+
+	if (!gcc) {
+		pr_err("qseecom_legacy_compat: gcc node not found, cannot vote CE1 clocks\n");
+		return;
+	}
+	compat_ce1_ahb_clk = compat_get_gcc_clk(gcc, COMPAT_GCC_CE1_AHB_CLK);
+	compat_ce1_axi_clk = compat_get_gcc_clk(gcc, COMPAT_GCC_CE1_AXI_CLK);
+	compat_ce1_clk = compat_get_gcc_clk(gcc, COMPAT_GCC_CE1_CLK);
+	of_node_put(gcc);
+}
+
+static void compat_ce1_clocks_disable(void)
+{
+	if (compat_ce1_clk) { clk_disable_unprepare(compat_ce1_clk); clk_put(compat_ce1_clk); }
+	if (compat_ce1_axi_clk) { clk_disable_unprepare(compat_ce1_axi_clk); clk_put(compat_ce1_axi_clk); }
+	if (compat_ce1_ahb_clk) { clk_disable_unprepare(compat_ce1_ahb_clk); clk_put(compat_ce1_ahb_clk); }
+}
+
+/* ---- /dev/ion compat ---- */
+
+typedef int ion_user_handle_t;
+
+struct ion_allocation_data {
+	size_t len;
+	size_t align;
+	unsigned int heap_id_mask;
+	unsigned int flags;
+	ion_user_handle_t handle;
+};
+
+struct ion_fd_data {
+	ion_user_handle_t handle;
+	int fd;
+};
+
+struct ion_handle_data {
+	ion_user_handle_t handle;
+};
+
+#define ION_IOC_MAGIC 'I'
+#define ION_IOC_ALLOC _IOWR(ION_IOC_MAGIC, 0, struct ion_allocation_data)
+#define ION_IOC_FREE  _IOWR(ION_IOC_MAGIC, 1, struct ion_handle_data)
+#define ION_IOC_MAP   _IOWR(ION_IOC_MAGIC, 2, struct ion_fd_data)
+#define ION_IOC_SHARE _IOWR(ION_IOC_MAGIC, 4, struct ion_fd_data)
+#define ION_IOC_IMPORT _IOWR(ION_IOC_MAGIC, 5, struct ion_fd_data)
+
+struct ion_compat_buf {
+	void *kva;
+	size_t len;
+	atomic_t refcnt;
+};
+
+static const struct file_operations ion_compat_buf_fops;
+
+static int ion_compat_buf_mmap(struct file *filp, struct vm_area_struct *vma)
+{
+	struct ion_compat_buf *buf = filp->private_data;
+	unsigned long size = vma->vm_end - vma->vm_start;
+
+	if (size > PAGE_ALIGN(buf->len))
+		return -EINVAL;
+
+	return remap_pfn_range(vma, vma->vm_start,
+			       virt_to_phys(buf->kva) >> PAGE_SHIFT,
+			       size, vma->vm_page_prot);
+}
+
+static int ion_compat_buf_release(struct inode *ino, struct file *filp)
+{
+	struct ion_compat_buf *buf = filp->private_data;
+
+	if (atomic_dec_and_test(&buf->refcnt)) {
+		kfree(buf->kva);
+		kfree(buf);
+	}
+	return 0;
+}
+
+static const struct file_operations ion_compat_buf_fops = {
+	.mmap = ion_compat_buf_mmap,
+	.release = ion_compat_buf_release,
+};
+
+/*
+ * Resolve one of our own ion-backed fds to its kernel buffer without taking
+ * a reference -- the caller only needs it for the duration of one ioctl,
+ * with the fd already held open by the calling process throughout. Returns
+ * NULL if fd isn't one of ours (validated the same way SET_MEM_PARAM_REQ
+ * already does).
+ */
+static struct ion_compat_buf *ion_compat_buf_lookup(int fd)
+{
+	struct fd f;
+	struct ion_compat_buf *buf;
+
+	if (fd <= 0)
+		return NULL;
+
+	f = fdget(fd);
+	if (!fd_file(f))
+		return NULL;
+	if (fd_file(f)->f_op != &ion_compat_buf_fops) {
+		fdput(f);
+		return NULL;
+	}
+	buf = fd_file(f)->private_data;
+	fdput(f);
+	return buf;
+}
+
+/* Simple fixed-size handle table -- this shim never needs many concurrent allocations. */
+#define ION_COMPAT_MAX_HANDLES 64
+static struct ion_compat_buf *ion_compat_handles[ION_COMPAT_MAX_HANDLES];
+static DEFINE_MUTEX(ion_compat_lock);
+
+static long ion_compat_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+{
+	void __user *argp = (void __user *)arg;
+
+	pr_info("qseecom_legacy_compat: ion ioctl cmd=0x%x (nr=%u)\n", cmd, _IOC_NR(cmd));
+
+	switch (cmd) {
+	case ION_IOC_ALLOC: {
+		struct ion_allocation_data d;
+		struct ion_compat_buf *buf;
+		int i;
+
+		if (copy_from_user(&d, argp, sizeof(d)))
+			return -EFAULT;
+		if (!d.len || d.len > (16 << 20))
+			return -EINVAL;
+
+		buf = kzalloc(sizeof(*buf), GFP_KERNEL);
+		if (!buf)
+			return -ENOMEM;
+		buf->kva = kzalloc(PAGE_ALIGN(d.len), GFP_KERNEL);
+		if (!buf->kva) {
+			kfree(buf);
+			return -ENOMEM;
+		}
+		buf->len = d.len;
+		atomic_set(&buf->refcnt, 1);
+
+		mutex_lock(&ion_compat_lock);
+		for (i = 0; i < ION_COMPAT_MAX_HANDLES; i++)
+			if (!ion_compat_handles[i])
+				break;
+		if (i == ION_COMPAT_MAX_HANDLES) {
+			mutex_unlock(&ion_compat_lock);
+			kfree(buf->kva);
+			kfree(buf);
+			return -ENOMEM;
+		}
+		ion_compat_handles[i] = buf;
+		mutex_unlock(&ion_compat_lock);
+
+		d.handle = i + 1;
+		if (copy_to_user(argp, &d, sizeof(d)))
+			return -EFAULT;
+		return 0;
+	}
+	case ION_IOC_FREE: {
+		struct ion_handle_data d;
+		int idx;
+
+		if (copy_from_user(&d, argp, sizeof(d)))
+			return -EFAULT;
+		idx = d.handle - 1;
+		if (idx < 0 || idx >= ION_COMPAT_MAX_HANDLES)
+			return -EINVAL;
+
+		mutex_lock(&ion_compat_lock);
+		if (ion_compat_handles[idx]) {
+			struct ion_compat_buf *buf = ion_compat_handles[idx];
+
+			ion_compat_handles[idx] = NULL;
+			if (atomic_dec_and_test(&buf->refcnt)) {
+				kfree(buf->kva);
+				kfree(buf);
+			}
+		}
+		mutex_unlock(&ion_compat_lock);
+		return 0;
+	}
+	case ION_IOC_SHARE:
+	case ION_IOC_MAP: {
+		struct ion_fd_data d;
+		struct ion_compat_buf *buf;
+		int idx, fd;
+
+		if (copy_from_user(&d, argp, sizeof(d)))
+			return -EFAULT;
+		idx = d.handle - 1;
+		if (idx < 0 || idx >= ION_COMPAT_MAX_HANDLES)
+			return -EINVAL;
+
+		mutex_lock(&ion_compat_lock);
+		buf = ion_compat_handles[idx];
+		if (buf)
+			atomic_inc(&buf->refcnt);
+		mutex_unlock(&ion_compat_lock);
+		if (!buf)
+			return -EINVAL;
+
+		fd = anon_inode_getfd("ion_compat_buf", &ion_compat_buf_fops,
+				      buf, O_RDWR | O_CLOEXEC);
+		if (fd < 0) {
+			if (atomic_dec_and_test(&buf->refcnt)) {
+				kfree(buf->kva);
+				kfree(buf);
+			}
+			return fd;
+		}
+
+		d.fd = fd;
+		if (copy_to_user(argp, &d, sizeof(d)))
+			return -EFAULT; /* fd already installed; acceptable leak on this rare error path */
+		return 0;
+	}
+	case ION_IOC_IMPORT: {
+		/* Not needed for this shim's single-process test flow. */
+		return -ENOTTY;
+	}
+	}
+	return -ENOTTY;
+}
+
+static int ion_compat_open(struct inode *ino, struct file *filp)
+{
+	pr_info("qseecom_legacy_compat: /dev/ion opened, flags=0x%x mode=0x%x\n",
+		filp->f_flags, filp->f_mode);
+	return 0;
+}
+
+static const struct file_operations ion_compat_fops = {
+	.owner = THIS_MODULE,
+	.open = ion_compat_open,
+	.unlocked_ioctl = ion_compat_ioctl,
+	.compat_ioctl = ion_compat_ioctl,
+};
+
+static struct miscdevice ion_compat_miscdev = {
+	.minor = MISC_DYNAMIC_MINOR,
+	.name = "ion",
+	.fops = &ion_compat_fops,
+};
+
+/* ---- /dev/qseecom compat ---- */
+
+#define MAX_APP_NAME_SIZE 64
+
+struct qseecom_send_cmd_req {
+	void *cmd_req_buf;
+	unsigned int cmd_req_len;
+	void *resp_buf;
+	unsigned int resp_len;
+};
+
+#define MAX_ION_FD 4
+
+struct qseecom_ion_fd_info {
+	__s32 fd;
+	__u32 cmd_buf_offset;
+};
+
+struct qseecom_send_modfd_cmd_req {
+	void *cmd_req_buf;
+	unsigned int cmd_req_len;
+	void *resp_buf;
+	unsigned int resp_len;
+	struct qseecom_ion_fd_info ifd_data[MAX_ION_FD];
+};
+
+struct qseecom_set_sb_mem_param_req {
+	__s32 ifd_data_fd;
+	void *virt_sb_base;
+	__u32 sb_len;
+};
+
+struct qseecom_qseos_app_load_query {
+	char app_name[MAX_APP_NAME_SIZE];
+	__u32 app_id;
+	__u32 app_arch;
+};
+
+struct qseecom_qseos_version_req {
+	unsigned int qseos_version;
+};
+
+struct qseecom_load_img_req {
+	__u32 mdt_len;
+	__u32 img_len;
+	__s32 ifd_data_fd;
+	char img_name[MAX_APP_NAME_SIZE];
+	__u32 app_arch;
+	__u32 app_id;
+};
+
+#define QSEECOM_IOC_MAGIC 0x97
+#define QSEECOM_IOCTL_SEND_CMD_REQ \
+	_IOWR(QSEECOM_IOC_MAGIC, 3, struct qseecom_send_cmd_req)
+#define QSEECOM_IOCTL_SEND_MODFD_CMD_REQ \
+	_IOWR(QSEECOM_IOC_MAGIC, 4, struct qseecom_send_modfd_cmd_req)
+#define QSEECOM_IOCTL_LOAD_APP_REQ \
+	_IOWR(QSEECOM_IOC_MAGIC, 7, struct qseecom_load_img_req)
+#define QSEECOM_IOCTL_SET_MEM_PARAM_REQ \
+	_IOWR(QSEECOM_IOC_MAGIC, 8, struct qseecom_set_sb_mem_param_req)
+#define QSEECOM_IOCTL_APP_LOADED_QUERY_REQ \
+	_IOWR(QSEECOM_IOC_MAGIC, 15, struct qseecom_qseos_app_load_query)
+#define QSEECOM_IOCTL_GET_QSEOS_VERSION_REQ \
+	_IOWR(QSEECOM_IOC_MAGIC, 10, struct qseecom_qseos_version_req)
+
+static struct qcom_tzmem_pool *compat_tzmem_pool;
+
+/*
+ * Debug-only escape hatch: when set, any SEND_CMD_REQ/SEND_MODFD_CMD_REQ
+ * resolved via the "keymaster64 by name" fallback path (i.e. NOT something
+ * this session itself loaded -- see qseecom_compat_send_cmd) is answered
+ * locally with a fabricated status=0 response instead of being sent to real
+ * TZ. Exists purely to see what a real vendor caller's OWN logic does after
+ * a keymaster64 call it depends on "succeeds", now that real TZ is already
+ * independently confirmed (many times over, via many real callers) to
+ * genuinely reject every RPMB-touching keymaster64 request regardless of
+ * caller. Never touches Gatekeeper's own keymaster64 calls in any other test
+ * path -- this is additive, opt-in, and off by default.
+ */
+static bool mock_keymaster64_success;
+module_param(mock_keymaster64_success, bool, 0644);
+MODULE_PARM_DESC(mock_keymaster64_success,
+		 "Fabricate a status=0 response for keymaster64 calls resolved by name, for testing what real vendor code does past a call it can never actually get to succeed on real hardware");
+
+/*
+ * TZ-loaded apps survive a HLOS module reload but our name->id registry does
+ * not, so a fresh insmod re-tries LOAD_APP and TZ refuses ("already loaded",
+ * raw_call ret=-22). During dev iteration, pass the app_id gfp5288 was
+ * assigned on its first successful load so the reloaded module can reuse it
+ * instead of re-loading. 0 = disabled.
+ */
+static uint gfp5288_app_id;
+module_param(gfp5288_app_id, uint, 0644);
+MODULE_PARM_DESC(gfp5288_app_id,
+		 "Pre-seed the registry with gfp5288 already resident in TZ at this app_id (dev iteration across module reloads); 0 = disabled");
+
+/*
+ * TZ's own qcom_scm_qseecom_app_get_id() only resolves apps the boot chain
+ * loaded -- see the identical registry and comment in the modern TEE driver
+ * (drivers/tee/qseecom/core.c, struct qseecom_tee_app): it returns -ENOENT
+ * for one we loaded ourselves even while it is running and answering
+ * commands. Anything LOAD_APP_REQ loads through this shim needs the same
+ * kind of memory, or a second caller's own APP_LOADED_QUERY_REQ (polling for
+ * an app a *different* process already loaded, e.g. gf_ca_open_session
+ * waiting on a separate loader) will wrongly see it as absent.
+ */
+#define QSEECOM_COMPAT_MAX_LOADED 8
+struct qseecom_compat_loaded {
+	char name[MAX_APP_NAME_SIZE];
+	u32 app_id;
+	bool used;
+};
+static struct qseecom_compat_loaded compat_loaded[QSEECOM_COMPAT_MAX_LOADED];
+static DEFINE_MUTEX(compat_loaded_lock);
+
+static void compat_loaded_remember(const char *name, u32 app_id)
+{
+	int i;
+
+	mutex_lock(&compat_loaded_lock);
+	for (i = 0; i < QSEECOM_COMPAT_MAX_LOADED; i++) {
+		if (!compat_loaded[i].used) {
+			strscpy(compat_loaded[i].name, name, MAX_APP_NAME_SIZE);
+			compat_loaded[i].app_id = app_id;
+			compat_loaded[i].used = true;
+			break;
+		}
+	}
+	mutex_unlock(&compat_loaded_lock);
+}
+
+static bool compat_loaded_lookup(const char *name, u32 *out_app_id)
+{
+	int i;
+	bool found = false;
+
+	mutex_lock(&compat_loaded_lock);
+	for (i = 0; i < QSEECOM_COMPAT_MAX_LOADED; i++) {
+		if (compat_loaded[i].used && !strcmp(compat_loaded[i].name, name)) {
+			*out_app_id = compat_loaded[i].app_id;
+			found = true;
+			break;
+		}
+	}
+	mutex_unlock(&compat_loaded_lock);
+	return found;
+}
+
+struct qseecom_compat_session {
+	bool mem_param_set;
+	void *virt_sb_base;
+	u32 sb_len;
+	bool app_loaded;
+	u32 app_id;
+	/* Set when APP_LOADED_QUERY bound this session to keymaster64, so its
+	 * SEND_CMD still takes the mock path instead of the real (rejecting)
+	 * keymaster64 TA. gfp5288 and other bound apps leave this false. */
+	bool is_keymaster64;
+};
+
+/*
+ * Loads <name>.mdt via request_firmware(), exactly like the modern TEE
+ * driver's qseecom_tee_supp_load_app() (drivers/tee/qseecom/core.c) --
+ * reused here rather than duplicated logic-for-logic, minus that driver's
+ * own app registry (this shim has no equivalent, so a second load of the
+ * same name will genuinely fail the second time, matching real TZ
+ * behaviour: it will not load the same app twice without an unload).
+ * Deliberately ignores ifd_data_fd -- the real ABI stages the image via an
+ * ION-backed fd the caller fills in, but since this shim controls both
+ * sides of the test and already has a proven request_firmware() path
+ * (staged files under /sys/module/firmware_class/parameters/path), that
+ * indirection buys nothing here.
+ */
+static int qseecom_compat_load_app(const char *app_name, u32 *out_app_id)
+{
+	char fw_name[MAX_APP_NAME_SIZE + sizeof(".mdt")];
+	const struct firmware *mdt;
+	struct qcom_tzmem_pool_config pool_config = {
+		.policy = QCOM_TZMEM_POLICY_STATIC,
+	};
+	struct qcom_tzmem_pool *pool;
+	void *stage, *aligned;
+	phys_addr_t stage_phys, img_phys;
+	size_t img_len, stage_len;
+	ssize_t len;
+	u64 args[3];
+	u32 arg_types[3] = { QCOM_SCM_QSEECOM_RAW_VAL, QCOM_SCM_QSEECOM_RAW_VAL,
+			      QCOM_SCM_QSEECOM_RAW_VAL };
+	struct qcom_scm_qseecom_raw_resp raw_res = {};
+	int ret;
+
+	snprintf(fw_name, sizeof(fw_name), "%s.mdt", app_name);
+
+	ret = request_firmware(&mdt, fw_name, NULL);
+	pr_info("qseecom_legacy_compat: LOAD_APP request_firmware('%s') ret=%d\n",
+		fw_name, ret);
+	if (ret)
+		return ret;
+
+	len = qcom_mdt_get_image_size(mdt);
+	if (len < 0) {
+		ret = len;
+		goto out_release;
+	}
+	if (len > SZ_16M) {
+		ret = -EFBIG;
+		goto out_release;
+	}
+	img_len = len;
+
+	stage_len = PAGE_ALIGN(img_len) + SZ_4M;
+	pool_config.initial_size = stage_len;
+	pool_config.max_size = stage_len;
+
+	pool = qcom_tzmem_pool_new(&pool_config);
+	if (IS_ERR(pool)) {
+		ret = PTR_ERR(pool);
+		goto out_release;
+	}
+
+	stage = qcom_tzmem_alloc(pool, stage_len, GFP_KERNEL);
+	if (!stage) {
+		qcom_tzmem_pool_free(pool);
+		ret = -ENOMEM;
+		goto out_release;
+	}
+
+	stage_phys = qcom_tzmem_to_phys(stage);
+	img_phys = ALIGN(stage_phys, SZ_4M);
+	aligned = stage + (img_phys - stage_phys);
+
+	/*
+	 * Must pass a real struct device: the per-segment
+	 * request_firmware_into_buf() inside qcom_mdt_read_image() takes the
+	 * devres path (unlike the plain request_firmware(NULL) used for the
+	 * .mdt above) and NULL-derefs on dev->devres_lock otherwise. Use the
+	 * ion compat miscdevice, which is registered before any ioctl runs.
+	 */
+	len = qcom_mdt_read_image(ion_compat_miscdev.this_device, mdt, fw_name,
+				  aligned, img_len);
+	if (len < 0) {
+		ret = len;
+	} else {
+		args[0] = mdt->size;
+		args[1] = img_len;
+		args[2] = img_phys;
+
+		ret = qcom_scm_qseecom_raw_call(1 /* QSEECOM_TZ_CMD_APP_START */,
+						args, arg_types, 3, &raw_res);
+		pr_info("qseecom_legacy_compat: LOAD_APP raw_call ret=%d result=%llu type=%llu data=%llu\n",
+			ret, raw_res.result, raw_res.resp_type, raw_res.data);
+
+		if (!ret && raw_res.result == 0 && raw_res.resp_type == 0xEE01)
+			*out_app_id = raw_res.data;
+		else if (!ret)
+			ret = -EIO;
+	}
+
+	qcom_tzmem_free(stage);
+	qcom_tzmem_pool_free(pool);
+
+out_release:
+	release_firmware(mdt);
+	return ret;
+}
+
+/*
+ * Shared by SEND_CMD_REQ and SEND_MODFD_CMD_REQ -- both bounce-copy a
+ * request/response pair through a qcom_tzmem allocation and send it to
+ * whichever app this session has resolved (see the fields' own comments).
+ * ifd_data is NULL for plain SEND_CMD_REQ; for SEND_MODFD_CMD_REQ each
+ * populated entry's ion buffer is appended after the request/response
+ * region and its *physical* address patched into the request at
+ * cmd_buf_offset -- QSEE requires physical addresses in the request body
+ * itself, which is exactly what this indirection is for.
+ */
+static long qseecom_compat_send_cmd(struct qseecom_compat_session *s,
+				    void __user *cmd_req_buf, unsigned int cmd_req_len,
+				    void __user *resp_buf, unsigned int resp_len,
+				    struct qseecom_ion_fd_info *ifd_data)
+{
+	void *kbuf;
+	size_t total, extra, extra_off, rsp_off;
+	u32 app_id;
+	int ret, i;
+	struct ion_compat_buf *ibuf[MAX_ION_FD] = {};
+
+	if (!cmd_req_len || cmd_req_len > (1 << 20) || resp_len > (1 << 20))
+		return -EINVAL;
+
+	/*
+	 * Use this session's own LOAD_APP_REQ result when it loaded one
+	 * itself. Otherwise fall back to resolving "keymaster64" by name --
+	 * the original narrow use case this shim was built for, where the
+	 * app is already boot-resident and no session ever calls
+	 * LOAD_APP_REQ at all.
+	 */
+	if (s->app_loaded) {
+		app_id = s->app_id;
+		/*
+		 * A session bound to keymaster64 (via APP_LOADED_QUERY) still
+		 * takes the mock path -- the real keymaster64 TA rejects these
+		 * calls (-40) on this non-provisioned device. Sessions bound to
+		 * gfp5288 fall through to a real app_send below.
+		 */
+		if (mock_keymaster64_success && s->is_keymaster64) {
+			if (resp_len && clear_user(resp_buf, resp_len))
+				return -EFAULT;
+			pr_info("qseecom_legacy_compat: SEND_CMD mocked keymaster64 success (bound session, mock=1)\n");
+			return 0;
+		}
+	} else {
+		ret = qcom_scm_qseecom_app_get_id("keymaster64", &app_id);
+		if (ret)
+			return ret;
+
+		if (mock_keymaster64_success) {
+			/*
+			 * Real response convention observed this session: a
+			 * leading little-endian u32 status field. Zero it (and
+			 * everything else -- we have no real key material to
+			 * offer) to report success; the caller's own downstream
+			 * logic, not real TZ, decides what happens next.
+			 */
+			if (resp_len && clear_user(resp_buf, resp_len))
+				return -EFAULT;
+			pr_info("qseecom_legacy_compat: SEND_CMD mocked keymaster64 success (mock_keymaster64_success=1)\n");
+			return 0;
+		}
+	}
+
+	/* Reserve space for each ion buffer's content after req+resp. */
+	extra = 0;
+	if (ifd_data) {
+		for (i = 0; i < MAX_ION_FD; i++) {
+			if (ifd_data[i].fd <= 0)
+				continue;
+			ibuf[i] = ion_compat_buf_lookup(ifd_data[i].fd);
+			if (!ibuf[i]) {
+				pr_info("qseecom_legacy_compat: SEND_MODFD_CMD_REQ ifd_data[%d] fd=%d not ours\n",
+					i, ifd_data[i].fd);
+				return -EINVAL;
+			}
+			extra += PAGE_ALIGN(ibuf[i]->len);
+		}
+	}
+
+	/*
+	 * qcom_scm_qseecom_app_send() calls qcom_tzmem_to_phys() on both
+	 * buffers, which only resolves memory allocated from a qcom_tzmem
+	 * pool -- plain kzalloc() memory has no tracked physical mapping
+	 * there and yields an invalid address, which is rejected by the SMC
+	 * layer before it ever reaches TZ (confirmed: status=-22 with no
+	 * real TZ round-trip). Same reasoning is why each ion buffer's
+	 * *content* is copied into this same tzmem allocation rather than
+	 * patching the ion buffer's own (untracked) address directly.
+	 *
+	 * The response region starts on a page boundary rather than
+	 * immediately after the request, matching both the real vendor
+	 * client's own shared-buffer layout and this kernel's own generic
+	 * TEE qseecom driver (drivers/tee/qseecom/core.c, QSEECOM_TEE_XFER_ALIGN)
+	 * -- TZ has been observed elsewhere to refuse an invoke whose request
+	 * is >=16 bytes with "invalid argument" when the two abut.
+	 */
+	rsp_off = PAGE_ALIGN(cmd_req_len);
+	total = PAGE_ALIGN(rsp_off + resp_len) + extra;
+	kbuf = qcom_tzmem_alloc(compat_tzmem_pool, total, GFP_KERNEL);
+	if (!kbuf)
+		return -ENOMEM;
+
+	if (copy_from_user(kbuf, cmd_req_buf, cmd_req_len)) {
+		qcom_tzmem_free(kbuf);
+		return -EFAULT;
+	}
+
+	extra_off = PAGE_ALIGN(rsp_off + resp_len);
+	for (i = 0; i < MAX_ION_FD; i++) {
+		phys_addr_t phys;
+
+		if (!ibuf[i])
+			continue;
+		memcpy(kbuf + extra_off, ibuf[i]->kva, ibuf[i]->len);
+		phys = qcom_tzmem_to_phys(kbuf + extra_off);
+		if (ifd_data[i].cmd_buf_offset + sizeof(u32) <= cmd_req_len) {
+			u32 phys32 = (u32)phys;
+
+			memcpy(kbuf + ifd_data[i].cmd_buf_offset, &phys32, sizeof(phys32));
+		}
+		pr_info("qseecom_legacy_compat: SEND_MODFD_CMD_REQ ifd_data[%d] fd=%d len=%zu patched phys=0x%llx at offset=%u\n",
+			i, ifd_data[i].fd, ibuf[i]->len, (unsigned long long)phys,
+			ifd_data[i].cmd_buf_offset);
+		print_hex_dump(KERN_INFO, "qseecom_legacy_compat: ionreq: ", DUMP_PREFIX_OFFSET,
+			      16, 1, ibuf[i]->kva, min_t(size_t, ibuf[i]->len, 96), false);
+		extra_off += PAGE_ALIGN(ibuf[i]->len);
+	}
+
+	print_hex_dump(KERN_INFO, "qseecom_legacy_compat: req: ", DUMP_PREFIX_OFFSET,
+		      16, 1, kbuf, min_t(size_t, cmd_req_len, 128), false);
+	ret = qcom_scm_qseecom_app_send(app_id, kbuf, cmd_req_len,
+					kbuf + rsp_off, resp_len);
+	pr_info("qseecom_legacy_compat: app_send ret=%d\n", ret);
+	if (!ret && resp_len)
+		print_hex_dump(KERN_INFO, "qseecom_legacy_compat: rsp: ", DUMP_PREFIX_OFFSET,
+			      16, 1, kbuf + rsp_off, min_t(size_t, resp_len, 128), false);
+	/*
+	 * The real vendor client never copies a narrow "response" slice back
+	 * on its own -- cmd_req_buf/resp_buf are userspace pointers into one
+	 * ION buffer the client itself mmap'd once, so whatever the TA writes
+	 * anywhere in that shared memory is already visible to it. Some real
+	 * TAs -- Goodix's included, per drivers/tee/qseecom/core.c's own
+	 * request-writeback fix -- answer in the request buffer rather than
+	 * (or in addition to) the response one, using it as working memory.
+	 * A private staging buffer with a narrow single-region copy-back
+	 * cannot reproduce that, so copy the whole staged request region back
+	 * too, not just the nominal response range, whenever the call
+	 * succeeds -- otherwise anything the TA wrote outside the response
+	 * slice is silently lost.
+	 */
+	if (!ret) {
+		if (copy_to_user(cmd_req_buf, kbuf, cmd_req_len))
+			ret = -EFAULT;
+	}
+	if (!ret && resp_len) {
+		if (copy_to_user(resp_buf, kbuf + rsp_off, resp_len))
+			ret = -EFAULT;
+	}
+	/*
+	 * CRITICAL: the TA answers inside the SEND_MODFD ion buffers (Goodix
+	 * writes sensor dims / chip info / config back into the request ion
+	 * buffer it was handed, e.g. gf_hal reads g_sensor_row from offset 0x64
+	 * of the INIT buffer). Those live in our private tzmem staging copy at
+	 * kbuf+extra_off, NOT in the caller's ion mapping -- copy each one back
+	 * to ibuf->kva or every ion response is silently lost (all-zero).
+	 */
+	if (!ret) {
+		size_t back_off = PAGE_ALIGN(rsp_off + resp_len);
+
+		for (i = 0; i < MAX_ION_FD; i++) {
+			if (!ibuf[i])
+				continue;
+			memcpy(ibuf[i]->kva, kbuf + back_off, ibuf[i]->len);
+			back_off += PAGE_ALIGN(ibuf[i]->len);
+		}
+	}
+
+	qcom_tzmem_free(kbuf);
+	return ret;
+}
+
+static int qseecom_compat_open(struct inode *ino, struct file *filp)
+{
+	struct qseecom_compat_session *s = kzalloc(sizeof(*s), GFP_KERNEL);
+
+	if (!s)
+		return -ENOMEM;
+	filp->private_data = s;
+	return 0;
+}
+
+static int qseecom_compat_release(struct inode *ino, struct file *filp)
+{
+	kfree(filp->private_data);
+	return 0;
+}
+
+static long qseecom_compat_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+{
+	struct qseecom_compat_session *s = filp->private_data;
+	void __user *argp = (void __user *)arg;
+
+	pr_info("qseecom_legacy_compat: qseecom ioctl cmd=0x%x (nr=%u)\n", cmd, _IOC_NR(cmd));
+
+	switch (cmd) {
+	case QSEECOM_IOCTL_LOAD_APP_REQ: {
+		struct qseecom_load_img_req req;
+		u32 app_id = 0;
+		int ret;
+
+		if (copy_from_user(&req, argp, sizeof(req)))
+			return -EFAULT;
+		req.img_name[MAX_APP_NAME_SIZE - 1] = '\0';
+		pr_info("qseecom_legacy_compat: LOAD_APP img_name='%s'\n", req.img_name);
+
+		if (s->app_loaded) {
+			/*
+			 * Idempotent: QSEECom_start_app() does APP_LOADED_QUERY
+			 * (which now binds this session to the resolved app)
+			 * and THEN LOAD_APP. Returning -EBUSY here makes
+			 * gf_ca_open_session() treat the whole start_app as a
+			 * failure (surfaced as gf_hal_open ret=1002). Report
+			 * success with the already-bound app_id instead.
+			 */
+			pr_info("qseecom_legacy_compat: LOAD_APP session already has app %u loaded (idempotent success)\n",
+				s->app_id);
+			req.app_id = s->app_id;
+			if (copy_to_user(argp, &req, sizeof(req)))
+				return -EFAULT;
+			return 0;
+		}
+
+		/* Already loaded by a different session/process -- reuse it
+		 * rather than asking TZ to load the same name twice, which
+		 * it will refuse. */
+		if (compat_loaded_lookup(req.img_name, &app_id)) {
+			pr_info("qseecom_legacy_compat: LOAD_APP '%s' already loaded as app_id=%u (reusing)\n",
+				req.img_name, app_id);
+		} else {
+			ret = qseecom_compat_load_app(req.img_name, &app_id);
+			if (ret)
+				return ret;
+			compat_loaded_remember(req.img_name, app_id);
+		}
+
+		s->app_loaded = true;
+		s->app_id = app_id;
+		req.app_id = app_id;
+		if (copy_to_user(argp, &req, sizeof(req)))
+			return -EFAULT;
+		pr_info("qseecom_legacy_compat: LOAD_APP '%s' loaded as app_id=%u\n",
+			req.img_name, app_id);
+		return 0;
+	}
+	case QSEECOM_IOCTL_SET_MEM_PARAM_REQ: {
+		struct qseecom_set_sb_mem_param_req req;
+		struct fd f;
+
+		if (copy_from_user(&req, argp, sizeof(req))) {
+			pr_info("qseecom_legacy_compat: SET_MEM_PARAM copy_from_user failed\n");
+			return -EFAULT;
+		}
+		pr_info("qseecom_legacy_compat: SET_MEM_PARAM ifd=%d virt_sb_base=%p sb_len=%u\n",
+			req.ifd_data_fd, req.virt_sb_base, req.sb_len);
+		if (req.ifd_data_fd <= 0 || !req.virt_sb_base || !req.sb_len) {
+			pr_info("qseecom_legacy_compat: SET_MEM_PARAM invalid args\n");
+			return -EFAULT;
+		}
+
+		/* Validate the fd is one of ours; don't bother resolving its
+		 * backing memory -- SEND_CMD_REQ bounce-copies via the
+		 * caller's own user pointers directly, see file header. */
+		f = fdget(req.ifd_data_fd);
+		if (!fd_file(f)) {
+			pr_info("qseecom_legacy_compat: SET_MEM_PARAM fdget failed\n");
+			return -EINVAL;
+		}
+		if (fd_file(f)->f_op != &ion_compat_buf_fops) {
+			pr_info("qseecom_legacy_compat: SET_MEM_PARAM fd not ours, f_op=%ps\n",
+				fd_file(f)->f_op);
+			fdput(f);
+			return -EINVAL;
+		}
+		fdput(f);
+
+		s->mem_param_set = true;
+		s->virt_sb_base = req.virt_sb_base;
+		s->sb_len = req.sb_len;
+		pr_info("qseecom_legacy_compat: SET_MEM_PARAM ok\n");
+		return 0;
+	}
+	case QSEECOM_IOCTL_APP_LOADED_QUERY_REQ: {
+		struct qseecom_qseos_app_load_query q;
+		u32 app_id;
+		int ret;
+
+		if (copy_from_user(&q, argp, sizeof(q)))
+			return -EFAULT;
+		q.app_name[MAX_APP_NAME_SIZE - 1] = '\0';
+		pr_info("qseecom_legacy_compat: APP_LOADED_QUERY app_name='%s'\n", q.app_name);
+
+		/* Check what this shim itself loaded first -- TZ's own query
+		 * can't see it, see the registry comment above. */
+		if (compat_loaded_lookup(q.app_name, &app_id)) {
+			pr_info("qseecom_legacy_compat: APP_LOADED_QUERY '%s' found in local registry, app_id=%u\n",
+				q.app_name, app_id);
+		} else {
+			ret = qcom_scm_qseecom_app_get_id(q.app_name, &app_id);
+			pr_info("qseecom_legacy_compat: APP_LOADED_QUERY app_get_id ret=%d app_id=%u\n",
+				ret, app_id);
+			if (ret) {
+				/*
+				 * Not boot-resident and not in our registry.
+				 * The real libQSEEComAPI on THIS device reads a
+				 * -EEXIST reply as "already loaded, done" and
+				 * never issues LOAD_APP_REQ (confirmed: no
+				 * LOAD_APP/request_firmware in dmesg for
+				 * gfp5288), so the app would never become
+				 * resident and gf_ca_open_session gets a null
+				 * handle -> gf_hal_open null-derefs. Load the
+				 * app inline right here instead and hand back a
+				 * real app_id.
+				 */
+				ret = qseecom_compat_load_app(q.app_name, &app_id);
+				if (ret) {
+					pr_info("qseecom_legacy_compat: APP_LOADED_QUERY inline-load '%s' failed ret=%d\n",
+						q.app_name, ret);
+					return -EEXIST;
+				}
+				compat_loaded_remember(q.app_name, app_id);
+				pr_info("qseecom_legacy_compat: APP_LOADED_QUERY inline-loaded '%s' app_id=%u\n",
+					q.app_name, app_id);
+			}
+		}
+
+		/*
+		 * Bind this session to the resolved app so its later SEND_CMD
+		 * routes to it (e.g. gfp5288). keymaster64 is flagged so it
+		 * still takes the mock path in the send handler.
+		 */
+		s->app_loaded = true;
+		s->app_id = app_id;
+		s->is_keymaster64 = !strcmp(q.app_name, "keymaster64");
+
+		q.app_id = app_id;
+		q.app_arch = 64; /* keymaster64 etc are all 64-bit TAs on this device */
+		if (copy_to_user(argp, &q, sizeof(q)))
+			return -EFAULT;
+		return 0;
+	}
+	case QSEECOM_IOCTL_GET_QSEOS_VERSION_REQ: {
+		struct qseecom_qseos_version_req v = { .qseos_version = 0x400 };
+
+		if (copy_to_user(argp, &v, sizeof(v)))
+			return -EFAULT;
+		return 0;
+	}
+	case QSEECOM_IOCTL_SEND_CMD_REQ: {
+		struct qseecom_send_cmd_req req;
+
+		if (copy_from_user(&req, argp, sizeof(req)))
+			return -EFAULT;
+		return qseecom_compat_send_cmd(s, req.cmd_req_buf, req.cmd_req_len,
+					       req.resp_buf, req.resp_len, NULL);
+	}
+	case QSEECOM_IOCTL_SEND_MODFD_CMD_REQ: {
+		struct qseecom_send_modfd_cmd_req req;
+
+		if (copy_from_user(&req, argp, sizeof(req)))
+			return -EFAULT;
+		return qseecom_compat_send_cmd(s, req.cmd_req_buf, req.cmd_req_len,
+					       req.resp_buf, req.resp_len, req.ifd_data);
+	}
+	}
+	return -ENOTTY;
+}
+
+static const struct file_operations qseecom_compat_fops = {
+	.owner = THIS_MODULE,
+	.open = qseecom_compat_open,
+	.release = qseecom_compat_release,
+	.unlocked_ioctl = qseecom_compat_ioctl,
+	.compat_ioctl = qseecom_compat_ioctl,
+};
+
+static struct miscdevice qseecom_compat_miscdev = {
+	.minor = MISC_DYNAMIC_MINOR,
+	.name = "qseecom",
+	.fops = &qseecom_compat_fops,
+};
+
+static int __init qseecom_legacy_compat_init(void)
+{
+	struct qcom_tzmem_pool_config cfg = {
+		.policy = QCOM_TZMEM_POLICY_STATIC,
+		.initial_size = SZ_1M,
+		.max_size = SZ_1M,
+	};
+	int ret;
+
+	compat_ce1_clocks_enable();
+
+	compat_tzmem_pool = qcom_tzmem_pool_new(&cfg);
+	if (IS_ERR(compat_tzmem_pool)) {
+		pr_err("qseecom_legacy_compat: tzmem pool alloc failed: %ld\n",
+		       PTR_ERR(compat_tzmem_pool));
+		compat_ce1_clocks_disable();
+		return PTR_ERR(compat_tzmem_pool);
+	}
+
+	ret = misc_register(&ion_compat_miscdev);
+	if (ret) {
+		qcom_tzmem_pool_free(compat_tzmem_pool);
+		return ret;
+	}
+
+	ret = misc_register(&qseecom_compat_miscdev);
+	if (ret) {
+		misc_deregister(&ion_compat_miscdev);
+		qcom_tzmem_pool_free(compat_tzmem_pool);
+		return ret;
+	}
+
+	if (gfp5288_app_id) {
+		compat_loaded_remember("gfp5288", gfp5288_app_id);
+		pr_info("qseecom_legacy_compat: pre-seeded gfp5288 as already-resident app_id=%u\n",
+			gfp5288_app_id);
+	}
+
+	pr_info("qseecom_legacy_compat: /dev/ion + /dev/qseecom shim active (test tool, not a real implementation)\n");
+	return 0;
+}
+
+static void __exit qseecom_legacy_compat_exit(void)
+{
+	misc_deregister(&qseecom_compat_miscdev);
+	qcom_tzmem_pool_free(compat_tzmem_pool);
+	misc_deregister(&ion_compat_miscdev);
+	compat_ce1_clocks_disable();
+}
+
+module_init(qseecom_legacy_compat_init);
+module_exit(qseecom_legacy_compat_exit);
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("Minimal legacy /dev/ion + /dev/qseecom compat shim for testing real vendor binaries");

@@ -1,0 +1,81 @@
+From: NixOS OnePlus 6 <op6@localhost>
+Date: Mon, 1 Jan 2026 00:00:00 +0000
+Subject: [PATCH] arm64: dts: qcom: sdm845-oneplus-enchilada: add Goodix fingerprint
+
+The OnePlus 6 carries a Goodix GF3626 rear capacitive sensor on a
+TrustZone-owned SPI bus (QUP15). Only its supply (a GPIO-switched rail),
+reset and interrupt lines are driven from the non-secure world; the bus
+belongs to the secure side. Mirrors the sm8250-xiaomi-elish binding, with
+enchilada's GPIOs and a fixed-regulator supply (gpio80) instead of a PMIC
+LDO, and firmware-name "gfp5288".
+
+Signed-off-by: NixOS OnePlus 6 <op6@localhost>
+diff --git a/arch/arm64/boot/dts/qcom/sdm845-oneplus-enchilada.dts b/arch/arm64/boot/dts/qcom/sdm845-oneplus-enchilada.dts
+index 5f01115e2..02772fc5b 100644
+--- a/arch/arm64/boot/dts/qcom/sdm845-oneplus-enchilada.dts
++++ b/arch/arm64/boot/dts/qcom/sdm845-oneplus-enchilada.dts
+@@ -5,6 +5,7 @@
+  * Copyright (c) 2020, The Linux Foundation. All rights reserved.
+  */
+ 
++#include <dt-bindings/interrupt-controller/irq.h>
+ #include <dt-bindings/leds/common.h>
+ #include "sdm845-oneplus-common.dtsi"
+ 
+@@ -42,6 +43,56 @@ main_cam_ois: main-cam-ois-regulator {
+ 
+ 		vin-supply = <&vreg_l22a_3p3>;
+ 	};
++
++	/*
++	 * Downstream drives the sensor's supply with a bare GPIO rather than
++	 * through a PMIC rail; model it the same way as a fixed regulator.
++	 */
++	goodix_fp_vdd: goodix-fp-vdd-regulator {
++		compatible = "regulator-fixed";
++		regulator-name = "goodix_fp_vdd";
++
++		regulator-min-microvolt = <3300000>;
++		regulator-max-microvolt = <3300000>;
++
++		gpio = <&tlmm 80 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++
++		pinctrl-names = "default";
++		pinctrl-0 = <&goodix_fp_vdd_default>;
++	};
++
++	fingerprint {
++		compatible = "goodix,gf3626";
++
++		interrupt-parent = <&tlmm>;
++		interrupts = <121 IRQ_TYPE_EDGE_RISING>;
++
++		reset-gpios = <&tlmm 35 GPIO_ACTIVE_LOW>;
++		vdd-supply = <&goodix_fp_vdd>;
++
++		firmware-name = "gfp5288";
++
++		pinctrl-names = "default";
++		pinctrl-0 = <&goodix_fp_irq_default>;
++	};
++};
++
++&tlmm {
++	goodix_fp_vdd_default: goodix-fp-vdd-default-state {
++		pins = "gpio80";
++		function = "gpio";
++		drive-strength = <8>;
++		bias-pull-up;
++	};
++
++	goodix_fp_irq_default: goodix-fp-irq-default-state {
++		pins = "gpio121";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++		input-enable;
++	};
+ };
+ 
+ &bq27441_fg {

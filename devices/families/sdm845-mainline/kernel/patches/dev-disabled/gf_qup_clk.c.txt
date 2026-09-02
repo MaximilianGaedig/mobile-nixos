@@ -1,0 +1,70 @@
+// SPDX-License-Identifier: GPL-2.0
+/* Vote the QUP wrap0 SPI clocks that the gfp5288 TZ app needs to drive the
+ * fingerprint sensor SPI. Mainline never enables these (the fp SPI QUP isn't
+ * in the HLOS DT); same pattern as qseecom_legacy_compat's CE1 clock vote. */
+#include <linux/module.h>
+#include <linux/of.h>
+#include <linux/clk.h>
+#include <linux/clk-provider.h>
+#include <linux/err.h>
+
+static struct clk *clks[8];
+static int nclk;
+
+/* SE0 (spi@880000, gpio0-3) is the fp SPI per gpio-reserved-ranges=<0 4>.
+ * Sweep the serial-clock rate via this param: insmod gf_qup_clk.ko s0_rate=... */
+static unsigned long s0_rate = 19200000;
+module_param(s0_rate, ulong, 0644);
+
+static void vote(struct device_node *gcc, unsigned int idx, unsigned long rate)
+{
+	struct of_phandle_args args = { .np = gcc, .args_count = 1, .args = { idx } };
+	struct clk *clk = of_clk_get_from_provider(&args);
+
+	if (IS_ERR(clk)) {
+		pr_err("gf_qup_clk: idx=%u get failed: %ld\n", idx, PTR_ERR(clk));
+		return;
+	}
+	if (rate)
+		clk_set_rate(clk, rate);
+	if (clk_prepare_enable(clk)) {
+		pr_err("gf_qup_clk: idx=%u enable failed\n", idx);
+		clk_put(clk);
+		return;
+	}
+	pr_info("gf_qup_clk: idx=%u enabled, rate=%lu\n", idx, clk_get_rate(clk));
+	clks[nclk++] = clk;
+}
+
+static int __init gf_qup_clk_init(void)
+{
+	struct device_node *gcc = of_find_compatible_node(NULL, NULL,
+							  "qcom,gcc-sdm845");
+	if (!gcc) {
+		pr_err("gf_qup_clk: gcc node not found\n");
+		return -ENODEV;
+	}
+	/* fp SPI is on WRAP1 SE7 (qup15, spi@a9c000, pins gpio81-84 reserved).
+	 * Vote the wrap1 wrapper AHB + the SE7 serial clock. Also keep wrap0
+	 * AHB (the eSE on SE0 lives there) — harmless. */
+	vote(gcc, 102, 0);		/* GCC_QUPV3_WRAP_1_M_AHB_CLK */
+	vote(gcc, 103, 0);		/* GCC_QUPV3_WRAP_1_S_AHB_CLK */
+	vote(gcc, 98, s0_rate);		/* GCC_QUPV3_WRAP1_S7_CLK (fp SE15) */
+	vote(gcc, 100, 0);		/* GCC_QUPV3_WRAP_0_M_AHB_CLK */
+	vote(gcc, 101, 0);		/* GCC_QUPV3_WRAP_0_S_AHB_CLK */
+	of_node_put(gcc);
+	pr_info("gf_qup_clk: QUP wrap0 SPI clocks voted (%d)\n", nclk);
+	return 0;
+}
+
+static void __exit gf_qup_clk_exit(void)
+{
+	int i;
+	for (i = 0; i < nclk; i++) {
+		clk_disable_unprepare(clks[i]);
+		clk_put(clks[i]);
+	}
+}
+module_init(gf_qup_clk_init);
+module_exit(gf_qup_clk_exit);
+MODULE_LICENSE("GPL");

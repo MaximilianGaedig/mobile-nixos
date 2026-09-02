@@ -1,0 +1,338 @@
+diff --git a/drivers/tee/qseecom/core.c b/drivers/tee/qseecom/core.c
+index 402ba887e..33528f26f 100644
+--- a/drivers/tee/qseecom/core.c
++++ b/drivers/tee/qseecom/core.c
+@@ -31,6 +31,7 @@
+ #include <linux/cleanup.h>
+ #include <linux/errno.h>
+ #include <linux/firmware.h>
++#include <linux/kstrtox.h>
+ #include <linux/list.h>
+ #include <linux/module.h>
+ #include <linux/mutex.h>
+@@ -45,6 +46,27 @@
+ #include <linux/unaligned.h>
+ #include <linux/wait.h>
+ 
++/*
++ * Temporary diagnostic knob: override the default APP_MGR load command for
++ * plain (single-param, no per-call override) app loads. Exists solely to
++ * test candidate "load service image" command values for cmnlib/cmnlib64
++ * against the already-proven-working single-param load path, sidestepping a
++ * separate, still-unexplained bug where the per-call 2-param override path
++ * (param[1] carrying an explicit cmd) gets rejected before ever reaching
++ * this driver's own open_session handler -- see FINDINGS.md. Remove once
++ * cmnlib loading is sorted out; every other app load needs the real default
++ * (1, QSEECOM_TZ_CMD_APP_START) so leave that as the module's own default.
++ */
++static uint qseecom_default_load_cmd = 1;
++module_param_named(default_load_cmd, qseecom_default_load_cmd, uint, 0644);
++MODULE_PARM_DESC(default_load_cmd,
++		 "APP_MGR command used for plain (non-overridden) app loads");
++
++static uint qseecom_default_img_phys_type; /* 0 = QCOM_SCM_QSEECOM_RAW_VAL; enum not visible yet here */
++module_param_named(default_img_phys_type, qseecom_default_img_phys_type, uint, 0644);
++MODULE_PARM_DESC(default_img_phys_type,
++		 "SCM raw arg type (0=VAL,1=RO,2=RW,3=BUFVAL) for the image address arg on plain app loads");
++
+ #include <linux/firmware/qcom/qcom_scm.h>
+ #include <linux/firmware/qcom/qcom_tzmem.h>
+ #include <linux/soc/qcom/mdt_loader.h>
+@@ -73,6 +95,15 @@
+  */
+ #define QSEECOM_TEE_MAX_XFER		SZ_16M
+ 
++/*
++ * Alignment of the response area within the staging buffer. TZ refuses an
++ * invoke whose request is 16 bytes or more with "invalid argument", and takes
++ * the same request one byte shorter, so it is objecting to where the response
++ * begins rather than to the request's length. The vendor's own client puts the
++ * two regions of its shared buffer on page boundaries, so do the same.
++ */
++#define QSEECOM_TEE_XFER_ALIGN		PAGE_SIZE
++
+ /* Sanity bound on an application image, so a bad size cannot exhaust memory. */
+ #define QSEECOM_TEE_MAX_IMAGE		SZ_16M
+ 
+@@ -858,7 +889,7 @@ static int qseecom_tee_invoke_func(struct tee_context *ctx,
+ 			.policy = QCOM_TZMEM_POLICY_STATIC,
+ 		};
+ 		struct qcom_tzmem_pool *bp;
+-		size_t need, off;
++		size_t need, off, rsp_off;
+ 		void *b;
+ 		unsigned int k;
+ 
+@@ -869,7 +900,19 @@ static int qseecom_tee_invoke_func(struct tee_context *ctx,
+ 		 * that user space has mapped are written through a cacheable
+ 		 * alias, and TZ does not see those writes.
+ 		 */
+-		need = req_size + rsp_size;
++
++		/*
++		 * The response starts on a page boundary rather than
++		 * immediately after the request: TZ refuses a request of 16
++		 * bytes or more when the two abut, and takes the same request
++		 * one byte shorter, so what it objects to is where the
++		 * response lands. The vendor client's own buffer is laid out
++		 * the same way, request region then response region, each
++		 * page aligned.
++		 */
++		rsp_off = ALIGN(req_size, QSEECOM_TEE_XFER_ALIGN);
++
++		need = rsp_off + rsp_size;
+ 		for (k = 2; k < arg->num_params; k += 2)
+ 			need += param[k + 1].u.memref.size;
+ 
+@@ -879,7 +922,7 @@ static int qseecom_tee_invoke_func(struct tee_context *ctx,
+ 		 * staging buffer is sized from, and a wrapped total would size
+ 		 * it far too small for the copies that follow.
+ 		 */
+-		if (need < req_size || need > QSEECOM_TEE_MAX_XFER)
++		if (need < rsp_off || need > QSEECOM_TEE_MAX_XFER)
+ 			return -EINVAL;
+ 
+ 		bc.initial_size = PAGE_ALIGN(need) + PAGE_SIZE;
+@@ -899,7 +942,7 @@ static int qseecom_tee_invoke_func(struct tee_context *ctx,
+ 		memcpy(b, req, req_size);
+ 
+ 		/* Copy each patched buffer in and repoint the request at it. */
+-		off = PAGE_ALIGN(req_size + rsp_size);
++		off = PAGE_ALIGN(rsp_off + rsp_size);
+ 		for (k = 2; k < arg->num_params; k += 2) {
+ 			struct tee_shm *pshm = param[k + 1].u.memref.shm;
+ 			size_t plen = param[k + 1].u.memref.size;
+@@ -950,11 +993,23 @@ static int qseecom_tee_invoke_func(struct tee_context *ctx,
+ 		}
+ 
+ 		ret = qcom_scm_qseecom_app_send(app_id, b, req_size,
+-						b + req_size, rsp_size);
++						b + rsp_off, rsp_size);
+ 		if (!ret) {
+-			memcpy(rsp, b + req_size, rsp_size);
++			memcpy(rsp, b + rsp_off, rsp_size);
+ 
+-			off = PAGE_ALIGN(req_size + rsp_size);
++			/*
++			 * An application may answer in the request rather than
++			 * in the response: the Goodix and FocalTech ones both
++			 * treat the buffer they were handed as theirs to write
++			 * back into, and a client that only reads the response
++			 * never sees that answer. Copy the request back when
++			 * the caller asked for it by passing an inout memref.
++			 */
++			if ((param[0].attr & TEE_IOCTL_PARAM_ATTR_TYPE_MASK) ==
++			    TEE_IOCTL_PARAM_ATTR_TYPE_MEMREF_INOUT)
++				memcpy(req, b, req_size);
++
++			off = PAGE_ALIGN(rsp_off + rsp_size);
+ 			for (k = 2; k < arg->num_params; k += 2) {
+ 				struct tee_shm *pshm = param[k + 1].u.memref.shm;
+ 				size_t plen = param[k + 1].u.memref.size;
+@@ -1453,22 +1508,138 @@ static int qseecom_tee_supp_load_app(struct tee_context *ctx,
+ 	ssize_t len;
+ 	struct qcom_tzmem_pool *pool;
+ 	u32 app_id;
++	u32 load_cmd = qseecom_default_load_cmd; /* QSEECOM_TZ_CMD_APP_START, normally */
++	u64 extra_args[4] = {};
++	unsigned int num_extra_args = 0;
++	unsigned int i;
+ 	int ret;
+ 
+-	if (arg->num_params != 1)
++	/*
++	 * Optional extra params, all VALUE_INPUT: param[1].a overrides which
++	 * APP_MGR command loads the image, param[1].b overrides the SCM arg
++	 * *type* (QCOM_SCM_VAL/RO/RW/BUFVAL) used for the img_phys address
++	 * arg specifically -- a plain value where TZ expects a buffer
++	 * descriptor is exactly the kind of thing the SMC dispatcher would
++	 * reject before ever reaching the app's own command handling, which
++	 * would explain the all-zero low-level failures seen so far.
++	 * param[2..] are appended as additional raw SCM args (always VAL)
++	 * after the standard (mdt_len, img_len, img_phys) triple. Every app
++	 * we've loaded via plain APP_START works fine with just one param,
++	 * as before; this all exists to let a hot-reloaded module try
++	 * candidate command numbers, argument counts, and now argument
++	 * types for cmnlib-style shared-library TAs (whose real vendor
++	 * loader uses a distinct "load service image" command we haven't
++	 * pinned down yet) without needing a kernel rebuild per attempt.
++	 */
++	u32 img_phys_type = qseecom_default_img_phys_type;
++
++	if (arg->num_params == 0 || arg->num_params > 5)
+ 		return -EINVAL;
+ 
++	for (i = 1; i < arg->num_params; i++) {
++		if ((param[i].attr & TEE_IOCTL_PARAM_ATTR_TYPE_MASK) !=
++		    TEE_IOCTL_PARAM_ATTR_TYPE_VALUE_INPUT)
++			return -EINVAL;
++	}
++
++	if (arg->num_params >= 2) {
++		load_cmd = param[1].u.value.a;
++		img_phys_type = param[1].u.value.b;
++	}
++	for (i = 2; i < arg->num_params; i++)
++		extra_args[num_extra_args++] = param[i].u.value.a;
++
++	pr_info("qseecom DEBUG: load_app cmd=%u num_extra_args=%u img_phys_type=%u\n",
++		load_cmd, num_extra_args, img_phys_type);
++
+ 	ret = qseecom_tee_get_app_name(&param[0], app_name, sizeof(app_name));
++	pr_info("qseecom DEBUG: get_app_name ret=%d attr=0x%x shm=%p size=%zu offs=%zu\n",
++		ret, param[0].attr, param[0].u.memref.shm,
++		param[0].u.memref.size, param[0].u.memref.shm_offs);
+ 	if (ret)
+ 		return ret;
+ 
++	/*
++	 * Debug sentinel, not a real app name: probes
++	 * TZ_OS_RPMB_CHECK_PROV_STATUS_ID (svc=TZ_SVC_RPMB, cmd=3, no args)
++	 * directly, bypassing image load entirely -- there is no other
++	 * userspace-visible path to an OS-level RPMB command, since
++	 * qcom_scm_qseecom_raw_call() (used above for real app loads) is
++	 * hardcoded to svc=APP_MGR. Answers whether QTEE considers the RPMB
++	 * authentication key provisioned on this device at all, independent
++	 * of any TA/listener code path already exercised. Returns -ENOANO
++	 * always (there is no session to open); the real answer is in the
++	 * pr_info below, via dmesg.
++	 */
++	if (!strcmp(app_name, "!rpmbprovstat")) {
++		struct qcom_scm_qseecom_raw_resp raw_res = {};
++
++		ret = qcom_scm_qseecom_raw_call_svc(QCOM_SCM_QSEECOM_RAW_SVC_RPMB,
++						    3, NULL, NULL, 0, &raw_res);
++		pr_info("qseecom DEBUG: rpmb_check_prov_status ret=%d result=%llu type=%llu data=%llu\n",
++			ret, raw_res.result, raw_res.resp_type, raw_res.data);
++		return -ENOANO;
++	}
++
++	/*
++	 * Debug sentinel: "!rpmbprovkey" issues TZ_OS_RPMB_PROVISION_KEY_ID
++	 * (svc=TZ_SVC_RPMB, cmd=1, one VAL arg = key_type=0 -- the standard
++	 * default; no real caller of this command exists anywhere in this
++	 * device's extracted userspace binaries to confirm the value against,
++	 * consistent with provisioning being a factory-time-only operation
++	 * this device may never have gone through). EXPLICITLY AUTHORIZED,
++	 * ONE-SHOT, STATE-MUTATING -- unlike every other sentinel here, this
++	 * one is not safe to retry casually: it writes real RPMB key state.
++	 * Confirmed available via !svcavail:32000401 (avail=1) before this was
++	 * ever added.
++	 */
++	if (!strcmp(app_name, "!rpmbprovkey")) {
++		struct qcom_scm_qseecom_raw_resp raw_res = {};
++		u64 key_type = 0;
++
++		pr_info("qseecom DEBUG: rpmb_provision_key ISSUING (key_type=%llu)\n",
++			key_type);
++		ret = qcom_scm_qseecom_raw_call_svc(QCOM_SCM_QSEECOM_RAW_SVC_RPMB,
++						    1, &key_type, NULL, 1, &raw_res);
++		pr_info("qseecom DEBUG: rpmb_provision_key ret=%d result=%llu type=%llu data=%llu\n",
++			ret, raw_res.result, raw_res.resp_type, raw_res.data);
++		return -ENOANO;
++	}
++
++	/*
++	 * Debug sentinel: "!svcavail:XXXXXXXX" (8 hex digits) asks TZ_INFO_
++	 * IS_SVC_AVAILABLE_ID (owner=SIP, svc=TZ_SVC_INFO, cmd=1) whether it
++	 * recognizes the packed SMC function ID XXXXXXXX -- a pure read-only
++	 * query, TZ does not execute that function, only reports whether it
++	 * exists. Exists to check TZ_OS_RPMB_CHECK_PROV_STATUS_ID's earlier
++	 * EINVAL really does mean "not implemented here" rather than a
++	 * malformed request, and to check RPMB_PROVISION_KEY/RPMB_ERASE the
++	 * same way without ever actually issuing either (both mutate real
++	 * RPMB key state and are not being called from this harness).
++	 */
++	if (!strncmp(app_name, "!svcavail:", 10) && strlen(app_name) == 18) {
++		u32 target_fnid;
++		u32 avail = 0;
++
++		if (kstrtou32(app_name + 10, 16, &target_fnid))
++			return -EINVAL;
++
++		ret = qcom_scm_qseecom_is_svc_available(target_fnid, &avail);
++		pr_info("qseecom DEBUG: is_svc_available fnid=0x%08x ret=%d avail=%u\n",
++			target_fnid, ret, avail);
++		return -ENOANO;
++	}
++
+ 	snprintf(fw_name, sizeof(fw_name), "%s.mdt", app_name);
+ 
++	pr_info("qseecom DEBUG: requesting firmware '%s'\n", fw_name);
+ 	ret = request_firmware(&mdt, fw_name, qtee->dev);
++	pr_info("qseecom DEBUG: request_firmware('%s') ret=%d\n", fw_name, ret);
+ 	if (ret)
+ 		return ret;
+ 
+ 	len = qcom_mdt_get_image_size(mdt);
++	pr_info("qseecom DEBUG: qcom_mdt_get_image_size('%s') = %zd\n", fw_name, len);
+ 	if (len < 0) {
+ 		ret = len;
+ 		goto out_release;
+@@ -1519,11 +1690,51 @@ static int qseecom_tee_supp_load_app(struct tee_context *ctx,
+ 	aligned = stage + (img_phys - stage_phys);
+ 
+ 	len = qcom_mdt_read_image(qtee->dev, mdt, fw_name, aligned, img_len);
+-	if (len < 0)
++	if (len < 0) {
+ 		ret = len;
+-	else
+-		ret = qcom_scm_qseecom_app_load(aligned, mdt_len, img_len,
+-						&app_id);
++	} else {
++		struct qcom_scm_qseecom_raw_resp raw_res = {};
++		u64 args[3 + ARRAY_SIZE(extra_args)];
++		u32 arg_types[3 + ARRAY_SIZE(extra_args)];
++		unsigned int num_args = 0;
++
++		args[num_args] = mdt_len;
++		arg_types[num_args] = QCOM_SCM_QSEECOM_RAW_VAL;
++		num_args++;
++
++		args[num_args] = img_len;
++		arg_types[num_args] = QCOM_SCM_QSEECOM_RAW_VAL;
++		num_args++;
++
++		args[num_args] = img_phys;
++		arg_types[num_args] = img_phys_type;
++		num_args++;
++
++		for (i = 0; i < num_extra_args; i++) {
++			args[num_args] = extra_args[i];
++			arg_types[num_args] = QCOM_SCM_QSEECOM_RAW_VAL;
++			num_args++;
++		}
++
++		ret = qcom_scm_qseecom_raw_call(load_cmd, args, arg_types,
++						num_args, &raw_res);
++		pr_info("qseecom DEBUG: raw_call(cmd=%u, num_args=%u) ret=%d result=%llu type=%llu data=%llu\n",
++			load_cmd, num_args, ret, raw_res.result,
++			raw_res.resp_type, raw_res.data);
++
++		/*
++		 * QSEECOM_RESULT_SUCCESS (0) and QSEECOM_SCM_RES_APP_ID
++		 * (0xEE01) are private to qcom_scm.c, not in the public
++		 * header this module can see -- hardcoded here with their
++		 * names in a comment rather than threading them through.
++		 */
++		if (!ret && raw_res.result == 0 && raw_res.resp_type == 0xEE01)
++			app_id = raw_res.data;
++		else if (!ret)
++			ret = -EIO;
++	}
++	pr_info("qseecom DEBUG: app_load_cmd(%u, '%s') ret=%d\n", load_cmd,
++		app_name, ret);
+ 
+ 	qcom_tzmem_free(stage);
+ 	qcom_tzmem_pool_free(pool);
+@@ -1594,6 +1805,10 @@ static int qseecom_tee_supp_open_session(struct tee_context *ctx,
+ 	u32 id;
+ 	int ret;
+ 
++	pr_info("qseecom DEBUG: supp_open_session num_params=%u uuid_null=%d attr0=0x%x\n",
++		arg->num_params, qseecom_tee_uuid_is_null(arg->uuid),
++		arg->num_params ? param[0].attr : 0);
++
+ 	if (!qseecom_tee_uuid_is_null(arg->uuid))
+ 		return -EINVAL;
+ 

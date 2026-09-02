@@ -1,0 +1,54 @@
+diff --git a/drivers/input/misc/goodix_fp_spi.c b/drivers/input/misc/goodix_fp_spi.c
+index 4c25396c8..cc1d315ee 100644
+--- a/drivers/input/misc/goodix_fp_spi.c
++++ b/drivers/input/misc/goodix_fp_spi.c
+@@ -32,6 +32,16 @@
+ #define GF_INPUT_NAME "uinput-goodix"
+ 
+ #define GF_VREG_LOAD_UA 100000
++
++/*
++ * Debug: power the sensor (VDD on + release reset) at probe and hold it, so the
++ * gfp5288 TZ app's SPI read/write test runs against a powered, out-of-reset
++ * sensor regardless of when/whether the HAL opens the chardev. The fp SPI SE0
++ * clock is voted separately (gf_qup_clk); the HAL may crash mid gf_hal_open
++ * before it powers the chip itself.
++ */
++static bool force_power_on = true;
++module_param(force_power_on, bool, 0644);
+ #define WAKELOCK_HOLD_TIME_MS 2000
+ 
+ /* Netlink ABI towards the fingerprint HAL */
+@@ -476,8 +486,10 @@ static int gf_open(struct inode *inode, struct file *filp)
+ 		goto err_unlock;
+ 	}
+ 
+-	/* Hold the sensor in reset until the HAL issues GF_IOC_RESET */
+-	gpiod_set_value_cansleep(gf_dev->reset_gpiod, 1);
++	/* Hold the sensor in reset until the HAL issues GF_IOC_RESET.
++	 * Skip when force_power_on already brought it out of reset at probe. */
++	if (!force_power_on)
++		gpiod_set_value_cansleep(gf_dev->reset_gpiod, 1);
+ 
+ 	rc = request_threaded_irq(gf_dev->irq, NULL, gf_irq,
+ 				  IRQF_TRIGGER_RISING | IRQF_ONESHOT,
+@@ -580,6 +592,19 @@ static int gf_probe(struct platform_device *pdev)
+ 		return dev_err_probe(dev, PTR_ERR(gf_dev->vdd),
+ 				     "failed to get vdd regulator\n");
+ 
++	if (force_power_on) {
++		regulator_set_load(gf_dev->vdd, GF_VREG_LOAD_UA);
++		rc = regulator_enable(gf_dev->vdd);
++		if (rc) {
++			dev_err(dev, "force_power_on: enable vdd failed: %d\n", rc);
++		} else {
++			/* release reset (active-low): drive line high = running */
++			gpiod_set_value_cansleep(gf_dev->reset_gpiod, 0);
++			msleep(20);
++			dev_info(dev, "force_power_on: vdd on, reset released\n");
++		}
++	}
++
+ 	gf_dev->input = devm_input_allocate_device(dev);
+ 	if (!gf_dev->input)
+ 		return -ENOMEM;

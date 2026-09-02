@@ -1,0 +1,66 @@
+From: Maximilian Gaedig <sly-keg-cheating@duck.com>
+Subject: [PATCH] arm64: dts: qcom: sdm845: drop gcc's CX power domain
+
+The global clock controller is runtime-resumed for as long as any of its
+clocks is prepared -- clk_core_prepare() holds a runtime-PM reference on
+the provider -- and gcc always has ~40 prepared on a running system. As a
+member of the cx genpd it is therefore permanently active, which makes
+genpd_power_off(cx) impossible; and since rpmhpd's cx is not active_only,
+to_active_sleep() mirrors the active corner into the RPMH_SLEEP_STATE
+vote, so qcom_stats/cxsd stays pinned at 0 however idle the system gets.
+
+Moving it to CX_AO fixes the sleep half but leaves a floor under
+non-suspend idle: rpmhpd_aggregate_corner() folds max(peer->corner,
+peer->enable_corner) into the shared cx.lvl ACTIVE vote for a merely
+*enabled* peer, so a permanently-enabled cx_ao pins ACTIVE at
+enable_corner (0x6 observed) even with cx and cx_ao both at perf 0. It
+also reparents all 13 gdscs into cx_ao, which hold it enabled themselves.
+
+gcc votes perf 0 either way, so dropping the domain costs no performance
+state, only the enable-hold. On a OnePlus 6 (enchilada) cx_ao idle time
+goes from 234 ms to 279451 ms and cx reaches off-0/perf 0 while awake
+once the display controller and BT UART release it.
+
+Signed-off-by: Maximilian Gaedig <sly-keg-cheating@duck.com>
+---
+--- a/arch/arm64/boot/dts/qcom/sdm845.dtsi	2026-09-02 20:02:32.827007491 +0200
++++ b/arch/arm64/boot/dts/qcom/sdm845.dtsi	2026-09-02 20:02:32.842999953 +0200
+@@ -1244,7 +1244,37 @@
+ 			#clock-cells = <1>;
+ 			#reset-cells = <1>;
+ 			#power-domain-cells = <1>;
+-			power-domains = <&rpmhpd SDM845_CX>;
++			/*
++			 * Deliberately in no power domain.
++			 *
++			 * clk_core_prepare() takes a runtime-PM reference on
++			 * the provider for as long as a clock stays prepared,
++			 * and gcc always has ~40 prepared, so
++			 * 100000.clock-controller is permanently runtime-active
++			 * (usage=40, suspended_time=0). As a device inside the
++			 * cx genpd that makes genpd_power_off(cx) impossible,
++			 * and because rpmhpd's cx is not active_only,
++			 * to_active_sleep() mirrors the active corner into the
++			 * RPMH_SLEEP_STATE vote -- so qcom_stats/cxsd stayed
++			 * pinned at 0 no matter how idle the system got, with
++			 * every cx device suspended and perf=0.
++			 *
++			 * SDM845_CX_AO fixes that half (cx_ao is active_only,
++			 * so its sleep contribution is forced to 0) but leaves
++			 * a floor under non-suspend idle: rpmhpd_aggregate_corner()
++			 * folds in max(peer->corner, peer->enable_corner) for a
++			 * merely *enabled* peer, so a permanently-enabled cx_ao
++			 * pinned the shared cx.lvl ACTIVE vote at enable_corner
++			 * (observed 0x6) even with cx and cx_ao both at perf 0.
++			 * It also reparents all 13 gdscs into cx_ao, which then
++			 * hold it enabled on their own.
++			 *
++			 * gcc votes perf 0 in either arrangement, so dropping
++			 * the domain costs no performance state -- only the
++			 * enable-hold. Measured on OnePlus 6: cx_ao idle time
++			 * 234 ms -> 279451 ms, and cx reaches off-0/perf 0
++			 * while awake once the display and BT UART release it.
++			 */
+ 		};
+ 
+ 		qfprom@784000 {
