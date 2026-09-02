@@ -1,0 +1,47 @@
+From: Maximilian Gaedig <sly-keg-cheating@duck.com>
+Subject: [PATCH] scsi: ufs: qcom: fix lane clock refcount leak on resume
+
+ufs_qcom_disable_lane_clks() is guarded by host->is_lane_clks_enabled, but
+ufs_qcom_enable_lane_clks() is not. The resume path enables the lane clocks
+twice -- once from ufs_qcom_setup_clocks() on POST_CHANGE and again from
+ufs_qcom_resume() -- while suspend disables them once, and because the
+disable side is guarded it cannot compensate. Every runtime suspend/resume
+cycle therefore leaks one reference on each lane clock.
+
+Measured on a OnePlus 6 (sdm845) over four forced cycles:
+
+  clk_bulk_enable   8   <- ufs_qcom_enable_lane_clks   (twice per cycle)
+  clk_bulk_disable  4   <- ufs_qcom_suspend            (once per cycle)
+  gcc_ufs_phy_ice_core_clk  +4 over the same four cycles
+
+The references accumulate without bound (observed reaching 256 over an hour of
+uptime) and, because these clocks are parented to gpll0 and thence to the
+rpmhcc XO, they keep bi_tcxo enabled. clk-rpmh then writes xo.lvl = 0x3 ("on")
+into the RPMH sleep set, so AOSS can never reach its deep states and qcom_stats
+aosd and cxsd stay pinned at 0.
+
+Mirror the guard from the disable path. After this change the refcount drains
+to 0 when idle and the sleep set reads cx.lvl = mx.lvl = xo.lvl = 0.
+
+Signed-off-by: Maximilian Gaedig <sly-keg-cheating@duck.com>
+---
+--- a/drivers/ufs/host/ufs-qcom.c	2026-09-03 01:24:06.471687145 +0200
++++ b/drivers/ufs/host/ufs-qcom.c	2026-09-03 01:24:06.504516634 +0200
+@@ -356,6 +356,17 @@
+ {
+ 	int err;
+ 
++	/*
++	 * Mirror the guard in ufs_qcom_disable_lane_clks(). The resume path
++	 * enables the lane clocks twice -- once from ufs_qcom_setup_clocks()
++	 * on POST_CHANGE and again from ufs_qcom_resume() -- while suspend
++	 * disables them once, and the disable side is guarded so it cannot
++	 * compensate. Without this check each runtime suspend/resume cycle
++	 * leaked one reference on every lane clock.
++	 */
++	if (host->is_lane_clks_enabled)
++		return 0;
++
+ 	err = clk_bulk_prepare_enable(host->num_clks, host->clks);
+ 	if (err)
+ 		return err;

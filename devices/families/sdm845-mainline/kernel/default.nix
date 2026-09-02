@@ -75,6 +75,14 @@ let
         # whole lifetime, pinning xo.lvl on in the RPMH sleep set. None need the
         # crystal while the AP is asleep. Takes bi_tcxo refs from 302 to 7.
         ./patches/sdm845-ufs-usb-xo-active-only.patch
+        # ufs_qcom_enable_lane_clks() lacked the is_lane_clks_enabled guard its
+        # disable counterpart has, so every runtime suspend/resume leaked one
+        # reference per lane clock. Those are parented to gpll0 -> rpmhcc XO, so
+        # the leak pinned xo.lvl = 0x3 in the RPMH sleep set and AOSS could never
+        # sleep. This is what kept aosd/cxsd at 0.
+        ./patches/ufs-qcom-lane-clk-refcount-leak.patch
+        # Tighter UFS idle timings (autosuspend 100ms, clkgate 10ms, AH8 5ms).
+        ./patches/ufs-qcom-idle-tuning.patch
         ./patches/sdm845-enchilada-bt-baud-min-svs.patch
         # Give uart6 an RX-edge wakeup IRQ + sleep pinctrl so the BT UART can
         # runtime-suspend and stop pinning CX at performance state 256.

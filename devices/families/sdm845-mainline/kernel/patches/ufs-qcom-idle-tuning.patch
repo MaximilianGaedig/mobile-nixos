@@ -1,0 +1,36 @@
+From: Maximilian Gaedig <sly-keg-cheating@duck.com>
+Subject: [PATCH] scsi: ufs: qcom: tighten idle timings for phone use
+
+The generic defaults are far too lazy for a battery-powered device:
+RPM_AUTOSUSPEND_DELAY_MS is 2000, clk_gating.delay_ms is 150 and auto-hibern8
+is 150ms, so a single I/O keeps the controller runtime-active -- and with it
+ufs_phy_gdsc and the CX rpmhpd at NOM -- for two full seconds. With journald
+and systemd timers writing periodically that covers most of an idle system.
+
+Signed-off-by: Maximilian Gaedig <sly-keg-cheating@duck.com>
+---
+--- a/drivers/ufs/host/ufs-qcom.c	2026-09-03 01:24:06.543687122 +0200
++++ b/drivers/ufs/host/ufs-qcom.c	2026-09-03 01:24:06.543687122 +0200
+@@ -1404,6 +1404,22 @@
+ 	hba->caps |= UFSHCD_CAP_AGGR_POWER_COLLAPSE;
+ 	hba->caps |= UFSHCD_CAP_RPM_AUTOSUSPEND;
+ 
++	/*
++	 * Idle-power tuning. The generic defaults are far too lazy for a phone:
++	 * RPM_AUTOSUSPEND_DELAY_MS is 2000, clk_gating.delay_ms is 150 and the
++	 * auto-hibern8 timer is 150ms, so a single I/O keeps the controller
++	 * runtime-active -- and with it ufs_phy_gdsc and the CX rpmhpd at
++	 * corner 256 (NOM) -- for two full seconds. With journald and systemd
++	 * timers writing periodically that covers most of an "idle" system, and
++	 * CX can never reach 0 so the rail never collapses. Downstream/Android
++	 * run these an order of magnitude tighter.
++	 */
++	hba->host->rpm_autosuspend_delay = 100;		/* ms, was 2000 */
++	hba->clk_gating.delay_ms = 10;			/* was 150 */
++	/* Auto-hibern8 after 5ms idle (timer value 5, scale 2 = 1ms units). */
++	hba->ahit = FIELD_PREP(UFSHCI_AHIBERN8_TIMER_MASK, 5) |
++		    FIELD_PREP(UFSHCI_AHIBERN8_SCALE_MASK, 2);
++
+ 	if (host->hw_ver.major >= 0x7)
+ 		hba->caps |= UFSHCD_CAP_TX_EQUALIZATION;
+ 
