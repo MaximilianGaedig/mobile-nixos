@@ -1,0 +1,61 @@
+From: Maximilian Gaedig <sly-keg-cheating@duck.com>
+Subject: [PATCH] arm64: dts: qcom: sdm845-oneplus: lower BT baud to drop CX vote
+
+qcom_geni_serial asks the SE for baud * UART_OVERSAMPLING (32; halved only
+on QUP >= v2.5, which sdm845 is not), matches that against the QUP source
+clock table, and feeds the result to dev_pm_opp_set_rate(), which rounds up
+to the next qup_opp_table entry. uart6 holds that performance-state vote for
+as long as the tty is open, so the Bluetooth link rate alone sets a
+permanent floor on the CX rail:
+
+  3200000 -> 102.4 MHz -> 128 MHz OPP -> rpmhpd_opp_nom     (256)
+  3000000 ->   96 MHz  -> 100 MHz OPP -> rpmhpd_opp_svs     (128)
+  2000000 ->   64 MHz  ->  75 MHz OPP -> rpmhpd_opp_low_svs  (64)
+
+Measured on a OnePlus 6: with Bluetooth up and otherwise idle, cx sat at
+performance state 256 with 898000.serial as the top voter, above even the
+display controller's 64. At 2 Mbaud the UART drops to the display's corner
+and Bluetooth stops being the top voter at all.
+
+Do not go lower to chase min_svs. 1500000 maps to the 50 MHz OPP, but the
+WCN3990 rejects the rate -- "Failed to change controller baudrate", then
+"Frame reassembly failed (-84)", and hci0 never comes up. QCA supports
+115200/921600/2000000/3000000/3200000, and 2000000 is the lowest of those
+that is also an exact entry in the QUP table, so it costs no divider
+approximation either.
+
+Verified on device: Bluetooth scans and pairs normally at 2 Mbaud.
+
+Signed-off-by: Maximilian Gaedig <sly-keg-cheating@duck.com>
+---
+--- a/arch/arm64/boot/dts/qcom/sdm845-oneplus-common.dtsi	2026-09-02 20:53:14.766841103 +0200
++++ b/arch/arm64/boot/dts/qcom/sdm845-oneplus-common.dtsi	2026-09-02 20:53:14.783035398 +0200
+@@ -1201,7 +1201,27 @@
+ 		vddrf-supply = <&vreg_pmu_rf>;
+ 		vddch0-supply = <&vreg_pmu_ch0>;
+ 
+-		max-speed = <3200000>;
++		/*
++		 * The GENI serial driver asks the SE for baud * UART_OVERSAMPLING
++		 * (32; only halved on QUP >= v2.5, which sdm845 is not) and feeds
++		 * the matched source-clock rate to dev_pm_opp_set_rate(), which
++		 * rounds up to the next qup_opp_table entry. uart6 holds that
++		 * performance-state vote for as long as the tty is open, so the BT
++		 * link rate alone sets a permanent floor on the CX rail:
++		 *
++		 *   3200000 -> 102.4 MHz -> 128 MHz OPP -> rpmhpd_opp_nom     (256)
++		 *   3000000 ->   96 MHz  -> 100 MHz OPP -> rpmhpd_opp_svs     (128)
++		 *   2000000 ->   64 MHz  ->  75 MHz OPP -> rpmhpd_opp_low_svs  (64)
++		 *
++		 * 2 Mbaud puts the UART at the same corner as the display, so
++		 * Bluetooth is no longer the top CX voter. Do NOT go lower to chase
++		 * min_svs: 1500000 would map to the 50 MHz OPP, but the WCN3990
++		 * rejects it -- "Failed to change controller baudrate" followed by
++		 * "Frame reassembly failed (-84)", and hci0 never comes up. QCA
++		 * supports 115200/921600/2000000/3000000/3200000; 2000000 is the
++		 * lowest of those that is also an exact QUP table entry.
++		 */
++		max-speed = <2000000>;
+ 	};
+ };
+ 

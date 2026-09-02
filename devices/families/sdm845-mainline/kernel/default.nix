@@ -61,6 +61,13 @@ let
         # pinned the shared cx.lvl ACTIVE vote at enable_corner. gcc votes
         # perf 0 either way, so only the enable-hold is lost.
         ./patches/sdm845-gcc-no-cx-power-domain.patch
+        # Drop the BT link from 3.2 to 3 Mbaud. The GENI SE clock request is
+        # baud * 16, and 51.2 MHz resolves to the 102.4 MHz QUP rate, which the
+        # OPP core rounds up to the 128 MHz entry = rpmhpd_opp_nom -- a vote the
+        # port holds for as long as the tty is open, so merely having Bluetooth
+        # up pinned CX at 256. 48 MHz is an exact QUP rate and rounds to the
+        # 50 MHz OPP = rpmhpd_opp_min_svs.
+        ./patches/sdm845-enchilada-bt-baud-min-svs.patch
         # Give uart6 an RX-edge wakeup IRQ + sleep pinctrl so the BT UART can
         # runtime-suspend and stop pinning CX at performance state 256.
         # Mirrors sc7180-trogdor; WCN3990 here has no host-wake GPIO.
