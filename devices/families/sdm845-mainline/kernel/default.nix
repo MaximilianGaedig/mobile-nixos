@@ -67,6 +67,10 @@ let
         # port holds for as long as the tty is open, so merely having Bluetooth
         # up pinned CX at 256. 48 MHz is an exact QUP rate and rounds to the
         # 50 MHz OPP = rpmhpd_opp_min_svs.
+        # All four remoteprocs took the sleep-voting rpmhcc XO as their "xo",
+        # so having the DSPs loaded pinned xo.lvl = 0x3 in the RPMH sleep set
+        # and AOSS could never reach its deep states (aosd and cxsd both 0).
+        ./patches/sdm845-remoteproc-xo-active-only.patch
         ./patches/sdm845-enchilada-bt-baud-min-svs.patch
         # Give uart6 an RX-edge wakeup IRQ + sleep pinctrl so the BT UART can
         # runtime-suspend and stop pinning CX at performance state 256.

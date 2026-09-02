@@ -1,0 +1,81 @@
+From: Maximilian Gaedig <sly-keg-cheating@duck.com>
+Subject: [PATCH] arm64: dts: qcom: sdm845: use CXO_CLK_A for remoteproc xo
+
+clk-rpmh gives the plain rpmhcc XO a valid_state_mask of
+WAKE | ACTIVE | SLEEP, while the _A variant votes in WAKE | ACTIVE only.
+An AP-side reference on the plain clock therefore writes xo.lvl = 0x3
+("on") into the RPMH *sleep* set, keeping the 19.2 MHz crystal running
+while the AP is asleep. AOSS only reaches its deep states with XO
+released, so this pins qcom_stats aosd AND cxsd at 0 together.
+
+All four remoteprocs took the plain clock as their "xo", so merely having
+the DSPs loaded was enough to hold it. Each DSP has its own RSC and votes
+XO for itself while running -- the AP does not need to hold it on their
+behalf across AP sleep.
+
+Measured on a OnePlus 6, fully quiesced with cx/mx/cx_ao all off-0 and the
+cx.lvl sleep vote correctly written as 0, the sleep set still contained
+xo.lvl = 0x3. After this change bi_tcxo's enable count drops from 302 to
+45 and its consumers are UFS and the USB PHYs; all four remoteprocs move
+to bi_tcxo_ao.
+
+Note this alone does not clear xo.lvl: UFS (ref_clk) and the USB PHYs
+still hold the plain clock, so the sleep vote remains 0x3 on a system
+whose UFS is up and whose USB cable is attached.
+
+Signed-off-by: Maximilian Gaedig <sly-keg-cheating@duck.com>
+---
+--- a/arch/arm64/boot/dts/qcom/sdm845.dtsi	2026-09-02 22:36:29.285212714 +0200
++++ b/arch/arm64/boot/dts/qcom/sdm845.dtsi	2026-09-02 22:36:29.317516391 +0200
+@@ -910,7 +910,23 @@
+ 		interrupt-names = "wdog", "fatal", "ready",
+ 				  "handover", "stop-ack";
+ 
+-		clocks = <&rpmhcc RPMH_CXO_CLK>;
++		/*
++		 * CXO_CLK_A, not CXO_CLK. The plain rpmhcc XO has
++		 * valid_state_mask = WAKE | ACTIVE | SLEEP, so an AP-side
++		 * reference on it writes xo.lvl = 0x3 ("on") into the RPMH
++		 * *sleep* set. Merely having the remoteprocs loaded therefore
++		 * kept the 19.2 MHz crystal voted on while the AP slept, and
++		 * AOSS can only reach its deep states with XO released -- so
++		 * qcom_stats aosd AND cxsd both stayed pinned at 0, together,
++		 * even with cx/mx/cx_ao all off-0 and the cx.lvl sleep vote
++		 * correctly written as 0.
++		 *
++		 * The _A variant votes in WAKE | ACTIVE only. Each DSP has its
++		 * own RSC and votes XO for itself while it is running, so the
++		 * AP does not need to hold it on the DSP's behalf across AP
++		 * sleep.
++		 */
++		clocks = <&rpmhcc RPMH_CXO_CLK_A>;
+ 		clock-names = "xo";
+ 
+ 		memory-region = <&adsp_mem>;
+@@ -1046,7 +1062,7 @@
+ 		interrupt-names = "wdog", "fatal", "ready",
+ 				  "handover", "stop-ack";
+ 
+-		clocks = <&rpmhcc RPMH_CXO_CLK>;
++		clocks = <&rpmhcc RPMH_CXO_CLK_A>;
+ 		clock-names = "xo";
+ 
+ 		memory-region = <&cdsp_mem>;
+@@ -3454,7 +3470,7 @@
+ 				 <&gcc GCC_MSS_SNOC_AXI_CLK>,
+ 				 <&gcc GCC_MSS_MFAB_AXIS_CLK>,
+ 				 <&gcc GCC_PRNG_AHB_CLK>,
+-				 <&rpmhcc RPMH_CXO_CLK>;
++				 <&rpmhcc RPMH_CXO_CLK_A>;
+ 			clock-names = "iface", "bus", "mem", "gpll0_mss",
+ 				      "snoc_axi", "mnoc_axi", "prng", "xo";
+ 
+@@ -3522,7 +3538,7 @@
+ 			interrupt-names = "wdog", "fatal", "ready",
+ 						"handover", "stop-ack";
+ 
+-			clocks = <&rpmhcc RPMH_CXO_CLK>;
++			clocks = <&rpmhcc RPMH_CXO_CLK_A>;
+ 			clock-names = "xo";
+ 
+ 			qcom,qmp = <&aoss_qmp>;
