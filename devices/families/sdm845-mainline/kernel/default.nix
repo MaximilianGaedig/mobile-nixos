@@ -71,6 +71,10 @@ let
         # so having the DSPs loaded pinned xo.lvl = 0x3 in the RPMH sleep set
         # and AOSS could never reach its deep states (aosd and cxsd both 0).
         ./patches/sdm845-remoteproc-xo-active-only.patch
+        # UFS host/PHY and both USB HS PHYs hold the sleep-voting XO for their
+        # whole lifetime, pinning xo.lvl on in the RPMH sleep set. None need the
+        # crystal while the AP is asleep. Takes bi_tcxo refs from 302 to 7.
+        ./patches/sdm845-ufs-usb-xo-active-only.patch
         ./patches/sdm845-enchilada-bt-baud-min-svs.patch
         # Give uart6 an RX-edge wakeup IRQ + sleep pinctrl so the BT UART can
         # runtime-suspend and stop pinning CX at performance state 256.

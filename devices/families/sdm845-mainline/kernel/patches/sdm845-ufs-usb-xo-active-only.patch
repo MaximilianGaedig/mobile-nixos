@@ -1,0 +1,65 @@
+From: Maximilian Gaedig <sly-keg-cheating@duck.com>
+Subject: [PATCH] arm64: dts: qcom: sdm845: active-only XO for UFS and USB HS PHYs
+
+clk-rpmh gives the plain rpmhcc XO valid_state_mask = WAKE|ACTIVE|SLEEP,
+while the _A variant votes WAKE|ACTIVE only, so any AP-side reference on the
+plain clock writes xo.lvl = 0x3 ("on") into the RPMH sleep set. AOSS only
+reaches its deep states with XO released, so this pins qcom_stats aosd and
+cxsd at 0 together.
+
+The UFS host controller, the UFS PHY and both USB HS PHYs take the plain
+clock and hold it for their whole lifetime -- the references survive runtime
+suspend, and for the USB PHY even survive unbinding the gadget and physically
+removing the cable (measured). None of them need the crystal running while
+the AP itself is asleep: UFS is in hibern8 (spm_lvl 3) and the USB PHY is
+powered down, and XO is restored before the AP touches either on resume.
+
+Measured on a OnePlus 6: bi_tcxo's reference count drops from 302 to 7, and
+88e2000.phy / 1d84000.ufshc / phy@1d87000 all move to bi_tcxo_ao. Booting
+from UFS with the active-only vote works normally.
+
+Note this is not by itself sufficient: xo.lvl is still 0x3, held by the
+remaining functional clocks (display, USB, UFS core, camcc) whose parent is
+bi_tcxo. cx.lvl and mx.lvl already vote 0, and every BCM sleep vote is
+zero-bandwidth, so XO is the last blocker.
+
+Signed-off-by: Maximilian Gaedig <sly-keg-cheating@duck.com>
+---
+--- a/arch/arm64/boot/dts/qcom/sdm845.dtsi	2026-09-03 00:48:38.895380787 +0200
++++ b/arch/arm64/boot/dts/qcom/sdm845.dtsi	2026-09-03 00:48:38.917811537 +0200
+@@ -2683,7 +2683,7 @@
+ 				<&gcc GCC_AGGRE_UFS_PHY_AXI_CLK>,
+ 				<&gcc GCC_UFS_PHY_AHB_CLK>,
+ 				<&gcc GCC_UFS_PHY_UNIPRO_CORE_CLK>,
+-				<&rpmhcc RPMH_CXO_CLK>,
++				<&rpmhcc RPMH_CXO_CLK_A>,
+ 				<&gcc GCC_UFS_PHY_TX_SYMBOL_0_CLK>,
+ 				<&gcc GCC_UFS_PHY_RX_SYMBOL_0_CLK>,
+ 				<&gcc GCC_UFS_PHY_RX_SYMBOL_1_CLK>,
+@@ -2732,7 +2732,7 @@
+ 			compatible = "qcom,sdm845-qmp-ufs-phy";
+ 			reg = <0 0x01d87000 0 0x1000>;
+ 
+-			clocks = <&rpmhcc RPMH_CXO_CLK>,
++			clocks = <&rpmhcc RPMH_CXO_CLK_A>,
+ 				 <&gcc GCC_UFS_PHY_PHY_AUX_CLK>,
+ 				 <&gcc GCC_UFS_MEM_CLKREF_CLK>;
+ 			clock-names = "ref",
+@@ -4122,7 +4122,7 @@
+ 			#phy-cells = <0>;
+ 
+ 			clocks = <&gcc GCC_USB_PHY_CFG_AHB2PHY_CLK>,
+-				 <&rpmhcc RPMH_CXO_CLK>;
++				 <&rpmhcc RPMH_CXO_CLK_A>;
+ 			clock-names = "cfg_ahb", "ref";
+ 
+ 			resets = <&gcc GCC_QUSB2PHY_PRIM_BCR>;
+@@ -4137,7 +4137,7 @@
+ 			#phy-cells = <0>;
+ 
+ 			clocks = <&gcc GCC_USB_PHY_CFG_AHB2PHY_CLK>,
+-				 <&rpmhcc RPMH_CXO_CLK>;
++				 <&rpmhcc RPMH_CXO_CLK_A>;
+ 			clock-names = "cfg_ahb", "ref";
+ 
+ 			resets = <&gcc GCC_QUSB2PHY_SEC_BCR>;
