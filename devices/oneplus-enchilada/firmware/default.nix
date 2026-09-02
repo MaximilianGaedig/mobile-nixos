@@ -25,6 +25,15 @@ runCommand "oneplus-sdm845-firmware"
     mkdir -p $out/lib/firmware/qca
     cp -f $baseFw/lib/firmware/postmarketos/qca/crbtfw21.tlv $out/lib/firmware/qca/crbtfw21.tlv
 
+    # hci_qca resolves the DT firmware-name relative to qca/, and upstream's
+    # sdm845-oneplus-common.dtsi asks for "OnePlus/enchilada/crnv21.bin" --
+    # but the NVM ships as qca/oneplus6/crnv21.bin, so the load failed with
+    # -ENOENT and the controller came up unconfigured (BD address
+    # 00:00:00:00:5A:AD). Mirror the qcom/sdm845 layout below.
+    mkdir -p $out/lib/firmware/qca/OnePlus
+    ln -s ../oneplus6 $out/lib/firmware/qca/OnePlus/enchilada
+    ln -s ../oneplus6 $out/lib/firmware/qca/OnePlus/fajita
+
     mkdir -p $out/lib/firmware/qcom/sdm845/OnePlus
 
     ln -s ../oneplus6 $out/lib/firmware/qcom/sdm845/OnePlus/enchilada
