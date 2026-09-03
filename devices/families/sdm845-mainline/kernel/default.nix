@@ -61,6 +61,10 @@ let
         # pinned the shared cx.lvl ACTIVE vote at enable_corner. gcc votes
         # perf 0 either way, so only the enable-hold is lost.
         ./patches/sdm845-gcc-no-cx-power-domain.patch
+        # The AOSS ucore drops the QMP link across system sleep and upstream has
+        # no PM ops, so from the first resume onward every message to the
+        # always-on processor fails with "ucore did not ack channel".
+        ./patches/qcom-aoss-qmp-pm-ops.patch
         # Drop the BT link from 3.2 to 3 Mbaud. The GENI SE clock request is
         # baud * 16, and 51.2 MHz resolves to the 102.4 MHz QUP rate, which the
         # OPP core rounds up to the 128 MHz entry = rpmhpd_opp_nom -- a vote the
@@ -110,6 +114,13 @@ let
         ./patches/msm-dsi-host-power-off-refcount.patch
         # OnePlus 6 delta (minimal, each independently upstream-able):
         ./0003-qseecom-enable-oneplus6.patch # qcom_scm QSEECOM machine allowlist
+        # Forward IMPLEMENTATION DEFINED sysreg traps to the VMM instead of
+        # injecting undef, so a guest driving SoC-specific registers can run
+        # under KVM. HCR_EL2.TIDCP traps the IMPDEF *encoding space*, which is
+        # architectural, so this works on Kryo as much as on Apple cores --
+        # the host CPU need not implement the registers at all; the VMM
+        # emulates them. Same patch as the pc host carries.
+        ./patches/kvm-arm-impdef-sysreg-to-user.patch
       ]
       ++ series ./patches/oneplus-enchilada; # the goodix,gf3626 DT node for enchilada
 

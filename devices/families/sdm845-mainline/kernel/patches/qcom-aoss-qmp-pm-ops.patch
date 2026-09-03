@@ -1,0 +1,69 @@
+From: Maximilian Gaedig <sly-keg-cheating@duck.com>
+Subject: [PATCH] soc: qcom: aoss: re-establish the QMP link across system sleep
+
+The AOSS ucore drops its side of the QMP link over a system sleep, so the
+channel opened at probe is stale by the time the AP resumes. Every message
+sent afterwards times out waiting for the ucore to drain it:
+
+  qcom_aoss_qmp c300000.power-management: ucore did not ack channel
+
+The driver installs no PM ops at all, so nothing ever re-establishes the
+link and the AP loses its channel to the always-on processor for the rest
+of the boot -- including the cooling-device path and every debugfs control
+(ddr_frequency_mhz, prevent_aoss_sleep, prevent_cx_collapse,
+prevent_ddr_collapse), all of which return -ETIMEDOUT from the first
+resume onward.
+
+Tear the link down on the way into sleep and redo the handshake on the way
+out.
+
+Signed-off-by: Maximilian Gaedig <sly-keg-cheating@duck.com>
+---
+--- a/drivers/soc/qcom/qcom_aoss.c	2026-09-03 03:27:02.006090244 +0200
++++ b/drivers/soc/qcom/qcom_aoss.c	2026-09-03 03:27:02.006090244 +0200
+@@ -9,6 +9,7 @@
+ #include <linux/mailbox_client.h>
+ #include <linux/module.h>
+ #include <linux/of_platform.h>
++#include <linux/pm.h>
+ #include <linux/platform_device.h>
+ #include <linux/thermal.h>
+ #include <linux/slab.h>
+@@ -658,11 +659,37 @@
+ };
+ MODULE_DEVICE_TABLE(of, qmp_dt_match);
+ 
++/*
++ * The AOSS ucore drops its side of the QMP link across a system sleep, so a
++ * channel opened at probe is stale by the time we resume and every message
++ * afterwards fails with "ucore did not ack channel". Upstream installs no PM
++ * ops at all, so nothing ever re-establishes it. Tear the link down on the way
++ * out and redo the handshake on the way back in.
++ */
++static int qmp_suspend(struct device *dev)
++{
++	struct qmp *qmp = dev_get_drvdata(dev);
++
++	qmp_close(qmp);
++
++	return 0;
++}
++
++static int qmp_resume(struct device *dev)
++{
++	struct qmp *qmp = dev_get_drvdata(dev);
++
++	return qmp_open(qmp);
++}
++
++static DEFINE_SIMPLE_DEV_PM_OPS(qmp_pm_ops, qmp_suspend, qmp_resume);
++
+ static struct platform_driver qmp_driver = {
+ 	.driver = {
+ 		.name		= "qcom_aoss_qmp",
+ 		.of_match_table	= qmp_dt_match,
+ 		.suppress_bind_attrs = true,
++		.pm		= pm_sleep_ptr(&qmp_pm_ops),
+ 	},
+ 	.probe = qmp_probe,
+ 	.remove = qmp_remove,
