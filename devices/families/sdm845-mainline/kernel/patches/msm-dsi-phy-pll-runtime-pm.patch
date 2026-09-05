@@ -1,0 +1,65 @@
+--- a/drivers/gpu/drm/msm/dsi/phy/dsi_phy_10nm.c
++++ b/drivers/gpu/drm/msm/dsi/phy/dsi_phy_10nm.c
+@@ -6,6 +6,7 @@
+ #include <dt-bindings/clock/qcom,dsi-phy-28nm.h>
+ #include <linux/clk.h>
+ #include <linux/clk-provider.h>
++#include <linux/pm_runtime.h>
+ #include <linux/iopoll.h>
+ 
+ #include "dsi_phy.h"
+@@ -338,6 +339,20 @@
+ 	struct device *dev = &pll_10nm->phy->pdev->dev;
+ 	int rc;
+ 
++	/*
++	 * These clk_ops write PHY registers, but the common clock framework
++	 * can call them from any consumer of the byte/pixel clocks with no
++	 * guarantee that this PHY -- or its MDSS parent, which owns the bus
++	 * clocks -- is resumed. An unclocked register access here is not a
++	 * benign read: this SoC escalates it through TZ into a full reset with
++	 * nothing left in the kernel log. Hold a reference across the op.
++	 */
++	rc = pm_runtime_resume_and_get(dev);
++	if (rc) {
++		DRM_DEV_ERROR(dev, "%s: resume failed, %d\n", __func__, rc);
++		return rc;
++	}
++
+ 	dsi_pll_enable_pll_bias(pll_10nm);
+ 	if (pll_10nm->slave)
+ 		dsi_pll_enable_pll_bias(pll_10nm->slave);
+@@ -345,6 +360,7 @@
+ 	rc = dsi_pll_10nm_vco_set_rate(hw,pll_10nm->vco_current_rate, 0);
+ 	if (rc) {
+ 		DRM_DEV_ERROR(dev, "vco_set_rate failed, rc=%d\n", rc);
++		pm_runtime_put(dev);
+ 		return rc;
+ 	}
+ 
+@@ -375,6 +391,8 @@
+ 		writel(0x01, pll_10nm->slave->phy->base + REG_DSI_10nm_PHY_CMN_RBUF_CTRL);
+ 
+ error:
++	if (rc)
++		pm_runtime_put(dev);
+ 	return rc;
+ }
+ 
+@@ -387,6 +405,7 @@
+ static void dsi_pll_10nm_vco_unprepare(struct clk_hw *hw)
+ {
+ 	struct dsi_pll_10nm *pll_10nm = to_pll_10nm(hw);
++	struct device *dev = &pll_10nm->phy->pdev->dev;
+ 
+ 	/*
+ 	 * To avoid any stray glitches while abruptly powering down the PLL
+@@ -403,6 +422,8 @@
+ 	/* flush, ensure all register writes are done */
+ 	wmb();
+ 	pll_10nm->phy->pll_on = false;
++	pm_runtime_put(dev);
++
+ }
+ 
+ static unsigned long dsi_pll_10nm_vco_recalc_rate(struct clk_hw *hw,

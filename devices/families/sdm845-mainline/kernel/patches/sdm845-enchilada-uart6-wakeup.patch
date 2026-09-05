@@ -1,0 +1,76 @@
+--- a/arch/arm64/boot/dts/qcom/sdm845-oneplus-common.dtsi
++++ b/arch/arm64/boot/dts/qcom/sdm845-oneplus-common.dtsi
+@@ -1186,6 +1186,21 @@
+ 	status = "okay";
+ 
+ 	pinctrl-0 = <&qup_uart6_4pin>;
++	pinctrl-1 = <&qup_uart6_sleep>;
++	pinctrl-names = "default", "sleep";
++
++	/*
++	 * NOTE: an RX-edge wakeup IRQ (tlmm 48), as sc7180-trogdor uses, was
++	 * tried here and must NOT be re-added. WCN3990 signals in-band on RX,
++	 * so while Bluetooth is up that interrupt fires the instant suspend
++	 * arms it -- "PM: Triggering wakeup from IRQ 126" -- aborting s2idle
++	 * after ~4s every time, before any CPU reaches an idle state. Removing
++	 * it takes the same suspend from 4s to the full 120s and is the
++	 * difference between s2idle working and not working at all.
++	 * The sleep pinctrl below is kept: it is what lets the port drop its
++	 * pins when the UART does runtime-suspend, and is independent of the
++	 * wakeup IRQ.
++	 */
+ 
+ 	bluetooth {
+ 		compatible = "qcom,wcn3990-bt";
+@@ -1266,6 +1281,51 @@
+ &tlmm {
+ 	gpio-reserved-ranges = <0 4>, <81 4>;
+ 
++	qup_uart6_sleep: qup-uart6-sleep-state {
++		cts-pins {
++			/*
++			 * Configure a pull-down on CTS to match the pull of
++			 * the Bluetooth module.
++			 */
++			pins = "gpio45";
++			function = "gpio";
++			bias-pull-down;
++		};
++
++		rts-pins {
++			/*
++			 * Configure pull-down on RTS. As RTS is active low
++			 * signal, pull it low to indicate the BT SoC that it
++			 * can wakeup the system anytime from suspend state by
++			 * pulling RX low (by sending wakeup bytes).
++			 */
++			pins = "gpio46";
++			function = "gpio";
++			bias-pull-down;
++		};
++
++		tx-pins {
++			/*
++			 * Configure pull-up on TX when it isn't actively driven
++			 * to prevent BT SoC from receiving garbage during sleep.
++			 */
++			pins = "gpio47";
++			function = "gpio";
++			bias-pull-up;
++		};
++
++		rx-pins {
++			/*
++			 * Configure a pull-up on RX. This is needed to avoid
++			 * garbage data when the TX pin of the Bluetooth module
++			 * is floating which may cause spurious wakeups.
++			 */
++			pins = "gpio48";
++			function = "gpio";
++			bias-pull-up;
++		};
++	};
++
+ 	main_cam_default: main-cam-default-state {
+ 		rst {
+ 			pins = "gpio28";

@@ -1,0 +1,24 @@
+--- a/drivers/gpu/drm/msm/dsi/dsi_host.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_host.c
+@@ -2571,6 +2571,21 @@
+ 	cfg_hnd->ops->link_clk_disable(msm_host);
+ 	pm_runtime_put(&msm_host->pdev->dev);
+ 
++	/*
++	 * Release the reference msm_dsi_host_power_on() took. The put above
++	 * only balances this function's own get_sync, so without this the
++	 * usage count never reaches zero: the host stays runtime-active with
++	 * the panel disabled and keeps mdss_gdsc -- and the CX rail -- up for
++	 * the whole uptime, which is the last thing preventing CX collapse.
++	 *
++	 * This is only safe together with the runtime-PM guard on the DSI PLL
++	 * clk_ops. Suspending here gates the MDSS bus clocks, and the clock
++	 * framework can call into the PHY's PLL ops from any consumer of the
++	 * byte/pixel clocks; unguarded, that register access lands on an
++	 * unpowered PHY and TZ resets the SoC.
++	 */
++	pm_runtime_put(&msm_host->pdev->dev);
++
+ 	regulator_bulk_disable(msm_host->cfg_hnd->cfg->num_regulators,
+ 			       msm_host->supplies);
+ 

@@ -1,0 +1,191 @@
+--- a/arch/arm64/include/asm/kvm_host.h
++++ b/arch/arm64/include/asm/kvm_host.h
+@@ -367,6 +367,8 @@
+ #define KVM_ARCH_FLAG_WRITABLE_IMP_ID_REGS		10
+ 	/* Unhandled SEAs are taken to userspace */
+ #define KVM_ARCH_FLAG_EXIT_SEA				11
++	/* IMPLEMENTATION DEFINED sysreg traps are taken to userspace */
++#define KVM_ARCH_FLAG_IMPDEF_SYSREG_TO_USER		12
+ 	unsigned long flags;
+ 
+ 	/* VM-wide vCPU feature set */
+@@ -887,6 +889,16 @@
+ 		u64 w;
+ 	} fgt[__NR_FGT_GROUP_IDS__];
+ 
++	/*
++	 * An IMPLEMENTATION DEFINED system register access handed out to
++	 * userspace, awaiting completion on the next KVM_RUN.
++	 */
++	struct {
++		bool pending;
++		bool is_write;
++		u8 rt;
++	} impdef_sysreg;
++
+ 	/* Exception Information */
+ 	struct kvm_vcpu_fault_info fault;
+ 
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -166,6 +166,10 @@
+ 		return -EINVAL;
+ 
+ 	switch (cap->cap) {
++	case KVM_CAP_ARM_IMPDEF_SYSREG_USER:
++		r = 0;
++		set_bit(KVM_ARCH_FLAG_IMPDEF_SYSREG_TO_USER, &kvm->arch.flags);
++		break;
+ 	case KVM_CAP_ARM_NISV_TO_USER:
+ 		r = 0;
+ 		set_bit(KVM_ARCH_FLAG_RETURN_NISV_IO_ABORT_TO_USER,
+@@ -427,6 +431,7 @@
+ 	case KVM_CAP_IRQFD_RESAMPLE:
+ 	case KVM_CAP_COUNTER_OFFSET:
+ 	case KVM_CAP_ARM_WRITABLE_IMP_ID_REGS:
++	case KVM_CAP_ARM_IMPDEF_SYSREG_USER:
+ 	case KVM_CAP_ARM_SEA_TO_USER:
+ 		r = 1;
+ 		break;
+@@ -1266,6 +1271,34 @@
+ 	return ret;
+ }
+ 
++/*
++ * Complete an IMPLEMENTATION DEFINED system register access that was handed to
++ * userspace via KVM_EXIT_ARM_SYSREG. Mirrors kvm_handle_mmio_return(): the VMM
++ * has either emulated the register -- supplying the value for a read -- or
++ * asked us to make the guest see an undefined instruction instead.
++ */
++static int kvm_handle_impdef_sysreg_return(struct kvm_vcpu *vcpu)
++{
++	struct kvm_run *run = vcpu->run;
++
++	if (!vcpu->arch.impdef_sysreg.pending)
++		return 1;
++
++	vcpu->arch.impdef_sysreg.pending = false;
++
++	if (run->arm_sysreg.error) {
++		kvm_inject_undefined(vcpu);
++		return 1;
++	}
++
++	if (!vcpu->arch.impdef_sysreg.is_write)
++		vcpu_set_reg(vcpu, vcpu->arch.impdef_sysreg.rt,
++			     run->arm_sysreg.data);
++
++	kvm_incr_pc(vcpu);
++	return 1;
++}
++
+ /**
+  * kvm_arch_vcpu_ioctl_run - the main VCPU run function to execute guest code
+  * @vcpu:	The VCPU pointer
+@@ -1286,6 +1319,12 @@
+ 		if (ret <= 0)
+ 			return ret;
+ 	}
++
++	if (run->exit_reason == KVM_EXIT_ARM_SYSREG) {
++		ret = kvm_handle_impdef_sysreg_return(vcpu);
++		if (ret <= 0)
++			return ret;
++	}
+ 
+ 	vcpu_load(vcpu);
+ 
+--- a/arch/arm64/kvm/sys_regs.c
++++ b/arch/arm64/kvm/sys_regs.c
+@@ -5289,6 +5289,48 @@
+ 		kvm_make_request(KVM_REQ_RELOAD_PMU, vcpu);
+ }
+ 
++/*
++ * Hand an IMPLEMENTATION DEFINED system register access to userspace.
++ *
++ * HCR_EL2.TIDCP traps EL1 accesses to the encodings the architecture reserves
++ * for IMPLEMENTATION DEFINED functionality (Op0 == 3 with CRn == 11 or 15).
++ * KVM cannot know what a given implementer put there, so it would inject an
++ * undefined instruction -- fatal for a guest whose kernel drives SoC-specific
++ * registers. An emulated Apple SoC running its own firmware, for instance,
++ * dies on its very first APCTL_EL1 (s3_4_c15_c0_4) read, long before it can
++ * print anything.
++ *
++ * The VMM already models these registers -- it has to, to emulate the SoC
++ * under a pure emulator -- so hand the access out and let it answer. Note the
++ * trap is keyed on the *encoding space*, which is architectural: this works
++ * whether or not the host CPU implements the register, so a guest expecting
++ * one vendor's registers can run on another vendor's silicon.
++ */
++static bool kvm_impdef_sysreg_to_user(struct kvm_vcpu *vcpu, u64 esr, int Rt)
++{
++	struct sys_reg_params p = esr_sys64_to_params(esr);
++	struct kvm_run *run = vcpu->run;
++
++	if (!test_bit(KVM_ARCH_FLAG_IMPDEF_SYSREG_TO_USER,
++		      &vcpu->kvm->arch.flags))
++		return false;
++
++	if (p.Op0 != 3 || (p.CRn != 11 && p.CRn != 15))
++		return false;
++
++	run->exit_reason = KVM_EXIT_ARM_SYSREG;
++	run->arm_sysreg.error = 0;
++	run->arm_sysreg.is_write = p.is_write;
++	run->arm_sysreg.esr = esr;
++	run->arm_sysreg.data = p.is_write ? vcpu_get_reg(vcpu, Rt) : 0;
++
++	vcpu->arch.impdef_sysreg.pending = true;
++	vcpu->arch.impdef_sysreg.is_write = p.is_write;
++	vcpu->arch.impdef_sysreg.rt = Rt;
++
++	return true;
++}
++
+ /**
+  * kvm_handle_sys_reg -- handles a system instruction or mrs/msr instruction
+  *			 trap on a guest execution
+@@ -5304,6 +5346,9 @@
+ 
+ 	trace_kvm_handle_sys_reg(esr);
+ 
++	if (kvm_impdef_sysreg_to_user(vcpu, esr, Rt))
++		return 0;
++
+ 	if (triage_sysreg_trap(vcpu, &sr_idx))
+ 		return 1;
+ 
+--- a/include/uapi/linux/kvm.h
++++ b/include/uapi/linux/kvm.h
+@@ -193,6 +193,7 @@
+ #define KVM_EXIT_ARM_SEA          41
+ #define KVM_EXIT_ARM_LDST64B      42
+ #define KVM_EXIT_SNP_REQ_CERTS    43
++#define KVM_EXIT_ARM_SYSREG       44
+ 
+ /* For KVM_EXIT_INTERNAL_ERROR */
+ /* Emulate instruction failed. */
+@@ -420,6 +421,14 @@
+ 			__u64 esr_iss;
+ 			__u64 fault_ipa;
+ 		} arm_nisv;
++		/* KVM_EXIT_ARM_SYSREG */
++		struct {
++			__u8 error; /* user -> kernel: non-zero => inject undef */
++			__u8 is_write; /* kernel -> user */
++			__u8 pad[6];
++			__u64 esr; /* kernel -> user: full ESR of the trap */
++			__u64 data; /* kernel <-> user */
++		} arm_sysreg;
+ 		/* KVM_EXIT_X86_RDMSR / KVM_EXIT_X86_WRMSR */
+ 		struct {
+ 			__u8 error; /* user -> kernel */
+@@ -996,6 +1005,7 @@
+ #define KVM_CAP_S390_USER_OPEREXEC 246
+ #define KVM_CAP_S390_KEYOP 247
+ #define KVM_CAP_S390_VSIE_ESAMODE 248
++#define KVM_CAP_ARM_IMPDEF_SYSREG_USER 249
+ 
+ struct kvm_irq_routing_irqchip {
+ 	__u32 irqchip;

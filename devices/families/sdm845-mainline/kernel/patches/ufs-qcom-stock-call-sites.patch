@@ -1,0 +1,63 @@
+From: Maximilian Gaedig <sly-keg-cheating@duck.com>
+Subject: [PATCH] scsi: ufs: qcom: drive the lane clocks only from suspend/resume
+
+The downstream sdm845 driver touches the lane clocks from exactly four places:
+enable in ufs_qcom_hce_enable_notify() and ufs_qcom_resume(), disable in
+ufs_qcom_suspend() and ufs_qcom_exit(). Its ufs_qcom_setup_clocks() does not
+touch them at all.
+
+Mainline adds a second enable/disable pair inside ufs_qcom_setup_clocks(),
+both conditional on ufs_qcom_is_link_hibern8(). That gives two enables per
+runtime resume against one effective disable per suspend -- the disable in
+ufs_qcom_setup_clocks() is swallowed by the is_lane_clks_enabled guard that
+ufs_qcom_suspend() has already cleared. Every cycle therefore leaks one
+reference on each lane clock, gcc_ufs_phy_* never reach zero, gpll0 and the
+rpmhcc XO stay up, xo.lvl is pinned in the RPMH sleep set and aosd/cxsd stay 0.
+
+It also makes the asymmetry unfixable in place. Guarding the enable (which is
+what downstream does) hangs the controller here, because the setup_clocks
+enable is conditional: when the link is not hibern8 on resume that path does
+not enable, and a guarded ufs_qcom_resume() then skips its enable too on a
+stale is_lane_clks_enabled, leaving the lane clocks off. The host wedges at
+power/runtime_status "resuming", SCSI never calls blk_post_runtime_resume(),
+and every LUN queue stays frozen -- silently, with no UIC error.
+
+Drop the mainline-only pair so the call sites match downstream. resume() then
+enables once and suspend() disables once, the count returns to zero while
+suspended, and no path can skip an enable that a resume needs.
+
+Signed-off-by: Maximilian Gaedig <sly-keg-cheating@duck.com>
+---
+--- a/drivers/ufs/host/ufs-qcom.c
++++ b/drivers/ufs/host/ufs-qcom.c
+@@ -1466,13 +1466,13 @@
+ 	case PRE_CHANGE:
+ 		if (on) {
+ 			ufs_qcom_icc_update_bw(host);
+-			if (ufs_qcom_is_link_hibern8(hba)) {
+-				err = ufs_qcom_enable_lane_clks(host);
+-				if (err) {
+-					dev_err(hba->dev, "enable lane clks failed, ret=%d\n", err);
+-					return err;
+-				}
+-			}
++			/*
++			 * No lane-clk enable here. The downstream driver drives
++			 * the lane clocks only from ufs_qcom_resume() and
++			 * ufs_qcom_suspend(); this extra pair is mainline-only
++			 * and made two enables race one effective disable per
++			 * cycle, leaking a reference and pinning the XO.
++			 */
+ 		} else {
+ 			if (!ufs_qcom_is_link_active(hba)) {
+ 				/* disable device ref_clk */
+@@ -1498,8 +1498,7 @@
+ 			if (ufshcd_is_hs_mode(&hba->pwr_info))
+ 				ufs_qcom_dev_ref_clk_ctrl(host, true);
+ 		} else {
+-			if (ufs_qcom_is_link_hibern8(hba))
+-				ufs_qcom_disable_lane_clks(host);
++			/* Matching the above: the disable belongs to suspend. */
+ 
+ 			ufs_qcom_icc_set_bw(host, ufs_qcom_bw_table[MODE_MIN][0][0].mem_bw,
+ 					    ufs_qcom_bw_table[MODE_MIN][0][0].cfg_bw);

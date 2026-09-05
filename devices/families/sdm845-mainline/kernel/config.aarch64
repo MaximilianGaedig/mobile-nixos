@@ -7417,7 +7417,7 @@ CONFIG_QCOM_SMP2P=y
 CONFIG_QCOM_SMSM=y
 CONFIG_QCOM_SOCINFO=y
 CONFIG_QCOM_SPM=m
-CONFIG_QCOM_STATS=m
+CONFIG_QCOM_STATS=y
 CONFIG_QCOM_WCNSS_CTRL=y
 CONFIG_QCOM_APR=y
 CONFIG_QCOM_ICC_BWMON=m
@@ -9401,11 +9401,8 @@ CONFIG_HAVE_ARCH_KFENCE=y
 #
 # CONFIG_PANIC_ON_OOPS is not set
 CONFIG_PANIC_TIMEOUT=0
-# CONFIG_SOFTLOCKUP_DETECTOR is not set
 CONFIG_HAVE_HARDLOCKUP_DETECTOR_BUDDY=y
 # CONFIG_HARDLOCKUP_DETECTOR is not set
-# CONFIG_DETECT_HUNG_TASK is not set
-# CONFIG_WQ_WATCHDOG is not set
 # CONFIG_WQ_CPU_INTENSIVE_REPORT is not set
 # CONFIG_TEST_LOCKUP is not set
 # end of Debug Oops, Lockups and Hangs
@@ -9635,3 +9632,13 @@ CONFIG_MEMTEST=y
 
 CONFIG_IO_URING_ZCRX=y
 CONFIG_IO_URING_BPF=y
+
+# Lockup detection. Without these the sysctls kernel.softlockup_panic /
+# kernel.hung_task_panic do not exist at all, which is why every spontaneous
+# reset on this device was evidence-free: a stall could never panic, so nothing
+# was ever written to ramoops. Compiled in but NOT armed by default
+# (BOOTPARAM_*_PANIC left off) so they stay runtime-togglable via sysctl.
+CONFIG_SOFTLOCKUP_DETECTOR=y
+CONFIG_DETECT_HUNG_TASK=y
+CONFIG_DEFAULT_HUNG_TASK_TIMEOUT=30
+CONFIG_WQ_WATCHDOG=y

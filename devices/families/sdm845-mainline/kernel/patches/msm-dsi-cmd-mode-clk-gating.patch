@@ -1,0 +1,265 @@
+--- a/drivers/gpu/drm/msm/dsi/dsi_host.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_host.c
+@@ -185,9 +185,29 @@
+ 	bool registered;
+ 	bool power_on;
+ 	bool enabled;
++	/* command mode: link clocks + runtime-PM ref released between frames */
++	bool clk_gated;
++	/* frame clocks currently re-acquired by kickoff_prepare() */
++	bool frame_clk_on;
+ 	int irq;
+ };
+ 
++/*
++ * Command-mode inter-frame clock gating. The panel holds the frame in its own
++ * RAM, so between updates the DSI link does not need to run at all -- this is
++ * what msm_dsi_host_enable()'s long-standing TODO describes and what downstream
++ * does. It needs the DPU side to re-acquire before each MDP START, which is why
++ * upstream left it disabled ("once mdp driver support it").
++ *
++ * Off by default: an unclocked DSI/PHY register access is escalated by TZ into
++ * a full SoC reset with nothing in the kernel log, so this is opt-in until
++ * validated on hardware.
++ */
++static bool cmd_mode_clk_gating;
++module_param(cmd_mode_clk_gating, bool, 0644);
++MODULE_PARM_DESC(cmd_mode_clk_gating,
++	"Gate DSI link clocks between frames on command-mode panels (default off)");
++
+ static inline u32 dsi_read(struct msm_dsi_host *msm_host, u32 reg)
+ {
+ 	return readl(msm_host->ctrl_base + reg);
+@@ -2430,6 +2450,42 @@
+ 	disable_irq(msm_host->irq);
+ }
+ 
++/*
++ * Called by the DPU command-mode encoder around each frame. No-ops unless
++ * enable() actually gated the clocks, so it is safe on every path.
++ */
++void msm_dsi_host_kickoff_prepare(struct mipi_dsi_host *host)
++{
++	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
++
++	/*
++	 * frame_clk_on makes this idempotent. DPU does not guarantee a 1:1
++	 * pairing -- wait_for_tx_complete() can run without a preceding
++	 * prepare_for_kickoff(), or more than once -- and an unmatched
++	 * link_clk_disable() underflows the clk refcount, which splats in
++	 * dsi_link_clk_disable_6g() and leaves the panel wedged with the
++	 * clocks already off by the time power_off() runs.
++	 */
++	if (!msm_host->clk_gated || msm_host->frame_clk_on)
++		return;
++
++	pm_runtime_get_sync(&msm_host->pdev->dev);
++	msm_host->cfg_hnd->ops->link_clk_enable(msm_host);
++	msm_host->frame_clk_on = true;
++}
++
++void msm_dsi_host_kickoff_complete(struct mipi_dsi_host *host)
++{
++	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
++
++	if (!msm_host->clk_gated || !msm_host->frame_clk_on)
++		return;
++
++	msm_host->frame_clk_on = false;
++	msm_host->cfg_hnd->ops->link_clk_disable(msm_host);
++	pm_runtime_put(&msm_host->pdev->dev);
++}
++
+ int msm_dsi_host_enable(struct mipi_dsi_host *host)
+ {
+ 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+@@ -2437,15 +2493,19 @@
+ 	dsi_op_mode_config(msm_host,
+ 		!!(msm_host->mode_flags & MIPI_DSI_MODE_VIDEO), true);
+ 
+-	/* TODO: clock should be turned off for command mode,
+-	 * and only turned on before MDP START.
+-	 * This part of code should be enabled once mdp driver support it.
+-	 */
+-	/* if (msm_panel->mode == MSM_DSI_CMD_MODE) {
+-	 *	dsi_link_clk_disable(msm_host);
+-	 *	pm_runtime_put(&msm_host->pdev->dev);
+-	 * }
+-	 */
++	/*
++	 * Command mode: drop the link clocks and the reference power_on() took.
++	 * msm_dsi_host_kickoff_prepare()/_complete() re-acquire them around each
++	 * frame, so between frames the host can runtime-suspend and release its
++	 * hold on mdss_gdsc and the CX rail. Refcounting balances exactly:
++	 * power_on() +1, here -1, each kickoff +1/-1, power_off() +1/-1.
++	 */
++	if (cmd_mode_clk_gating && !(msm_host->mode_flags & MIPI_DSI_MODE_VIDEO)) {
++		msm_host->cfg_hnd->ops->link_clk_disable(msm_host);
++		pm_runtime_put(&msm_host->pdev->dev);
++		msm_host->clk_gated = true;
++	}
++
+ 	msm_host->enabled = true;
+ 	return 0;
+ }
+@@ -2552,6 +2612,19 @@
+ 	const struct msm_dsi_cfg_handler *cfg_hnd = msm_host->cfg_hnd;
+ 	int ret;
+ 
++	/*
++	 * If enable() gated the clocks, re-take the reference it dropped so the
++	 * get/put pair below stays balanced and the teardown below runs with the
++	 * host resumed.
++	 */
++	if (msm_host->clk_gated) {
++		pm_runtime_get_sync(&msm_host->pdev->dev);
++		if (!msm_host->frame_clk_on)
++			cfg_hnd->ops->link_clk_enable(msm_host);
++		msm_host->frame_clk_on = false;
++		msm_host->clk_gated = false;
++	}
++
+ 
+ 	mutex_lock(&msm_host->dev_mutex);
+ 	if (!msm_host->power_on) {
+--- a/drivers/gpu/drm/msm/dsi/dsi.c
++++ b/drivers/gpu/drm/msm/dsi/dsi.c
+@@ -5,6 +5,18 @@
+ 
+ #include "dsi.h"
+ 
++void msm_dsi_kickoff_prepare(struct msm_dsi *msm_dsi)
++{
++	if (msm_dsi && msm_dsi->host)
++		msm_dsi_host_kickoff_prepare(msm_dsi->host);
++}
++
++void msm_dsi_kickoff_complete(struct msm_dsi *msm_dsi)
++{
++	if (msm_dsi && msm_dsi->host)
++		msm_dsi_host_kickoff_complete(msm_dsi->host);
++}
++
+ bool msm_dsi_is_cmd_mode(struct msm_dsi *msm_dsi)
+ {
+ 	unsigned long host_flags = msm_dsi_host_get_mode_flags(msm_dsi->host);
+--- a/drivers/gpu/drm/msm/dsi/dsi.h
++++ b/drivers/gpu/drm/msm/dsi/dsi.h
+@@ -68,6 +68,8 @@
+ 					const struct mipi_dsi_msg *msg);
+ void msm_dsi_host_cmd_xfer_commit(struct mipi_dsi_host *host,
+ 					u32 dma_base, u32 len);
++void msm_dsi_host_kickoff_prepare(struct mipi_dsi_host *host);
++void msm_dsi_host_kickoff_complete(struct mipi_dsi_host *host);
+ int msm_dsi_host_enable(struct mipi_dsi_host *host);
+ int msm_dsi_host_disable(struct mipi_dsi_host *host);
+ void msm_dsi_host_enable_irq(struct mipi_dsi_host *host);
+--- a/drivers/gpu/drm/msm/msm_drv.h
++++ b/drivers/gpu/drm/msm/msm_drv.h
+@@ -301,6 +301,8 @@
+ 			 struct drm_encoder *encoder);
+ void msm_dsi_snapshot(struct msm_disp_state *disp_state, struct msm_dsi *msm_dsi);
+ bool msm_dsi_is_cmd_mode(struct msm_dsi *msm_dsi);
++void msm_dsi_kickoff_prepare(struct msm_dsi *msm_dsi);
++void msm_dsi_kickoff_complete(struct msm_dsi *msm_dsi);
+ bool msm_dsi_is_bonded_dsi(struct msm_dsi *msm_dsi);
+ bool msm_dsi_is_master_dsi(struct msm_dsi *msm_dsi);
+ bool msm_dsi_wide_bus_enabled(struct msm_dsi *msm_dsi);
+@@ -322,6 +324,8 @@
+ static inline void msm_dsi_snapshot(struct msm_disp_state *disp_state, struct msm_dsi *msm_dsi)
+ {
+ }
++static inline void msm_dsi_kickoff_prepare(struct msm_dsi *msm_dsi) {}
++static inline void msm_dsi_kickoff_complete(struct msm_dsi *msm_dsi) {}
+ static inline bool msm_dsi_is_cmd_mode(struct msm_dsi *msm_dsi)
+ {
+ 	return false;
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c
+@@ -272,6 +272,46 @@
+  * dpu_encoder_is_widebus_enabled - return bool value if widebus is enabled
+  * @drm_enc:    Pointer to previously created drm encoder structure
+  */
++/*
++ * Command-mode inter-frame clock gating: bracket each frame so the DSI host
++ * only holds its runtime-PM reference (and its link clocks) while pixels are
++ * actually in flight. Between frames it can suspend, releasing mdss_gdsc and
++ * with it the CX rail. No-ops unless the DSI side actually gated (opt-in via
++ * the msm_dsi cmd_mode_clk_gating module parameter).
++ */
++static struct msm_dsi *_dpu_encoder_get_dsi(struct drm_encoder *drm_enc)
++{
++	struct msm_drm_private *priv;
++	struct dpu_encoder_virt *dpu_enc;
++	const struct msm_display_info *disp_info;
++	int index;
++
++	if (!drm_enc || !drm_enc->dev || !drm_enc->dev->dev_private)
++		return NULL;
++
++	priv = drm_enc->dev->dev_private;
++	dpu_enc = to_dpu_encoder_virt(drm_enc);
++	disp_info = &dpu_enc->disp_info;
++	index = disp_info->h_tile_instance[0];
++
++	if (disp_info->intf_type != INTF_DSI)
++		return NULL;
++	if (!priv->kms || index >= ARRAY_SIZE(priv->kms->dsi))
++		return NULL;
++
++	return priv->kms->dsi[index];
++}
++
++void dpu_encoder_dsi_kickoff_prepare(struct drm_encoder *drm_enc)
++{
++	msm_dsi_kickoff_prepare(_dpu_encoder_get_dsi(drm_enc));
++}
++
++void dpu_encoder_dsi_kickoff_complete(struct drm_encoder *drm_enc)
++{
++	msm_dsi_kickoff_complete(_dpu_encoder_get_dsi(drm_enc));
++}
++
+ bool dpu_encoder_is_widebus_enabled(const struct drm_encoder *drm_enc)
+ {
+ 	const struct dpu_encoder_virt *dpu_enc;
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.h
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.h
+@@ -72,6 +72,9 @@
+ 
+ bool dpu_encoder_is_widebus_enabled(const struct drm_encoder *drm_enc);
+ 
++void dpu_encoder_dsi_kickoff_prepare(struct drm_encoder *drm_enc);
++void dpu_encoder_dsi_kickoff_complete(struct drm_encoder *drm_enc);
++
+ bool dpu_encoder_is_dsc_enabled(const struct drm_encoder *drm_enc);
+ 
+ int dpu_encoder_get_crc_values_cnt(const struct drm_encoder *drm_enc);
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_cmd.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_cmd.c
+@@ -589,6 +589,10 @@
+ 		DPU_ERROR("invalid encoder\n");
+ 		return;
+ 	}
++
++	/* re-acquire the DSI link clocks for the duration of this frame */
++	dpu_encoder_dsi_kickoff_prepare(phys_enc->parent);
++
+ 	DRM_DEBUG_KMS("id:%u pp:%d pending_cnt:%d\n", DRMID(phys_enc->parent),
+ 		      phys_enc->hw_pp->idx - PINGPONG_0,
+ 		      atomic_read(&phys_enc->pending_kickoff_cnt));
+@@ -677,6 +681,14 @@
+ 			  phys_enc->hw_intf->idx - INTF_0);
+ 	}
+ 
++	/*
++	 * Release only once the transfer has drained. Doing this in
++	 * handle_post_kickoff() instead would gate the clocks while the frame
++	 * is still on the wire. If this path is skipped the reference simply
++	 * stays held, which costs power but cannot corrupt a frame.
++	 */
++	dpu_encoder_dsi_kickoff_complete(phys_enc->parent);
++
+ 	return rc;
+ }
+ 

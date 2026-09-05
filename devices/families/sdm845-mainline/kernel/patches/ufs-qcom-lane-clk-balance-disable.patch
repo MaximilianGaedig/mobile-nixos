@@ -1,0 +1,56 @@
+From: Maximilian Gaedig <sly-keg-cheating@duck.com>
+Subject: [PATCH] scsi: ufs: qcom: balance lane clock refcount from the disable side
+
+Each runtime suspend/resume cycle enables the lane clocks twice but disables
+them only once, so every cycle leaks one reference on each lane clock:
+
+  resume:  ufs_qcom_setup_clocks(on, PRE_CHANGE)  enable  (link is hibern8)
+           ufs_qcom_resume()                      enable  (unconditional)
+  suspend: ufs_qcom_suspend()                     disable (link not active)
+           ufs_qcom_setup_clocks(off)             disable (link is hibern8)  <- swallowed
+
+The second disable is swallowed because ufs_qcom_disable_lane_clks() returns
+early on !is_lane_clks_enabled, which the first disable has already cleared.
+Measured on a OnePlus 6 (sdm845), enable_count on gcc_ufs_phy_{rx,tx}_symbol_*
+and gcc_ufs_phy_ice_core_clk goes 1 -> 5 over four forced cycles, exactly +1
+each. The count therefore never returns to zero, gcc_ufs_phy_* keep gpll0 and
+thence the rpmhcc XO enabled, clk-rpmh writes xo.lvl = 0x3 into the RPMH sleep
+set, and qcom_stats aosd/cxsd stay pinned at 0.
+
+Fix it from the disable side so both disables land, matching the two enables.
+
+Note deliberately NOT taken: guarding ufs_qcom_enable_lane_clks() on
+is_lane_clks_enabled instead. That balances the count too, but it makes the
+enable a no-op on a resume path that genuinely needs it -- the lane clocks then
+stay off, ufs_qcom_resume() never completes, the host is stuck at
+power/runtime_status "resuming", SCSI never calls blk_post_runtime_resume(),
+and every LUN request queue stays frozen. The device becomes unbootable and
+unwritable with no UIC error and no abort to show for it. Adding a disable can
+only ever release a reference the driver already intended to release on this
+path; skipping an enable can strand the controller.
+
+Signed-off-by: Maximilian Gaedig <sly-keg-cheating@duck.com>
+---
+--- a/drivers/ufs/host/ufs-qcom.c
++++ b/drivers/ufs/host/ufs-qcom.c
+@@ -344,9 +344,17 @@
+ 
+ static void ufs_qcom_disable_lane_clks(struct ufs_qcom_host *host)
+ {
+-	if (!host->is_lane_clks_enabled)
+-		return;
+-
++	/*
++	 * No is_lane_clks_enabled guard here on purpose. A suspend runs two
++	 * disables (ufs_qcom_suspend() and ufs_qcom_setup_clocks(off)) against
++	 * the two enables a resume runs (ufs_qcom_setup_clocks(on) and
++	 * ufs_qcom_resume()); guarding this side swallowed the second disable
++	 * and leaked a reference on every lane clock per cycle, which kept the
++	 * rpmhcc XO enabled and pinned xo.lvl in the RPMH sleep set. Let both
++	 * disables through so the count actually reaches zero while suspended.
++	 * clk_bulk_disable_unprepare() already WARNs rather than underflowing
++	 * if it is ever called one time too many.
++	 */
+ 	clk_bulk_disable_unprepare(host->num_clks, host->clks);
+ 
+ 	host->is_lane_clks_enabled = false;

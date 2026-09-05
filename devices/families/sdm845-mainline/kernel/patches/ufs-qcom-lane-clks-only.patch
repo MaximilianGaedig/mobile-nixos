@@ -1,0 +1,78 @@
+From: Maximilian Gaedig <sly-keg-cheating@duck.com>
+Subject: [PATCH] scsi: ufs: qcom: only take the lane sync clocks in the variant
+
+ufs_qcom_init_lane_clks() calls devm_clk_bulk_get_all(), which takes *every*
+clock in the ufshc node -- core_clk, bus_aggr_clk, iface_clk, core_clk_unipro,
+ref_clk and ice_core_clk as well as the three lane sync clocks. Those are the
+same clocks the ufshcd core already owns: ufshcd_parse_operating_points()
+builds hba->clk_list from the identical clock-names, and ufshcd_setup_clocks()
+enables and gates them.
+
+So every non-lane clock is managed twice, by the core and by the variant, with
+neither aware of the other's reference. The variant's reference is never
+dropped at idle, so gcc_ufs_phy_* stay enabled, gpll0 and thence the rpmhcc XO
+stay up, clk-rpmh writes xo.lvl = 0x3 into the RPMH sleep set, and qcom_stats
+aosd/cxsd stay pinned at 0. Measured on a OnePlus 6 (sdm845): enable_count on
+gcc_ufs_phy_{rx,tx}_symbol_* and gcc_ufs_phy_ice_core_clk climbs 1 -> 5 over
+four forced runtime suspend/resume cycles and never returns to 0.
+
+Trying to balance that count inside the variant does not work, because it is not
+the variant's count to balance -- both directions were built and boot-tested and
+both hang the controller at power/runtime_status "resuming" with every LUN queue
+frozen: guarding ufs_qcom_enable_lane_clks() makes a needed enable a no-op, and
+letting the second disable through drops the clocks while the link still needs
+them to exit hibern8.
+
+Take only the lane sync clocks in the variant, which is the split the downstream
+driver uses (it holds rx/tx_lane[01]_sync_clk and nothing else), and leave the
+rest to the core so its clock gating can actually take them to zero.
+
+Signed-off-by: Maximilian Gaedig <sly-keg-cheating@duck.com>
+---
+--- a/drivers/ufs/host/ufs-qcom.c
++++ b/drivers/ufs/host/ufs-qcom.c
+@@ -373,19 +373,40 @@
+ 	return 0;
+ }
+ 
++/*
++ * Only the lane symbol clocks belong to the variant. Everything else in the
++ * ufshc node is already on hba->clk_list and is enabled/gated by the ufshcd
++ * core; taking those here too gives them a second, never-released reference
++ * and pins the rpmhcc XO. Matches the downstream driver's split.
++ */
++static const char * const ufs_qcom_lane_clk_names[] = {
++	"tx_lane0_sync_clk",
++	"rx_lane0_sync_clk",
++	"rx_lane1_sync_clk",
++};
++
+ static int ufs_qcom_init_lane_clks(struct ufs_qcom_host *host)
+ {
+-	int err;
+ 	struct device *dev = host->hba->dev;
++	int i, err;
+ 
+ 	if (has_acpi_companion(dev))
+ 		return 0;
+ 
+-	err = devm_clk_bulk_get_all(dev, &host->clks);
+-	if (err <= 0)
++	host->clks = devm_kcalloc(dev, ARRAY_SIZE(ufs_qcom_lane_clk_names),
++				  sizeof(*host->clks), GFP_KERNEL);
++	if (!host->clks)
++		return -ENOMEM;
++
++	for (i = 0; i < ARRAY_SIZE(ufs_qcom_lane_clk_names); i++)
++		host->clks[i].id = ufs_qcom_lane_clk_names[i];
++
++	err = devm_clk_bulk_get_optional(dev,
++			ARRAY_SIZE(ufs_qcom_lane_clk_names), host->clks);
++	if (err)
+ 		return err;
+ 
+-	host->num_clks = err;
++	host->num_clks = ARRAY_SIZE(ufs_qcom_lane_clk_names);
+ 
+ 	return 0;
+ }

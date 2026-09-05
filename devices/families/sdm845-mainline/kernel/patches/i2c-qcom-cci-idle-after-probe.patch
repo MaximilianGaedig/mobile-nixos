@@ -1,0 +1,42 @@
+From: Maximilian Gaedig <sly-keg-cheating@duck.com>
+Subject: [PATCH] i2c: qcom-cci: let the controller idle after probe
+
+cci_probe() leaves the device runtime-ACTIVE and never balances it:
+
+	pm_runtime_set_autosuspend_delay(dev, MSEC_PER_SEC);
+	pm_runtime_use_autosuspend(dev);
+	pm_runtime_set_active(dev);
+	pm_runtime_enable(dev);
+	...
+	return 0;
+
+pm_runtime_set_active() only declares the state; the autosuspend timer is
+armed by a put, and the sole get/put pair lives in cci_xfer(). On a system
+that never performs a camera transfer nothing ever puts, so the runtime
+suspend callback -- and with it cci_disable_clocks() -- is never reached and
+the CCI clocks stay on for the lifetime of the system.
+
+On sdm845 that pins cam_cc_pll0 and cam_cc_slow_ahb_clk_src, both direct
+children of bi_tcxo, which holds the XO vote up and prevents the SoC from
+reaching AOSD/CXSD sleep. Measured on a OnePlus 6 (enchilada): three of the
+six bi_tcxo references were owned by CCI with no camera in use.
+
+Drop an idle at the end of probe so the normal autosuspend path runs.
+
+Signed-off-by: Maximilian Gaedig <sly-keg-cheating@duck.com>
+---
+--- a/drivers/i2c/busses/i2c-qcom-cci.c
++++ b/drivers/i2c/busses/i2c-qcom-cci.c
+@@ -629,6 +629,12 @@
+ 		}
+ 	}
+ 
++	/*
++	 * Nothing has taken a runtime reference; arm the autosuspend timer so
++	 * the clocks enabled by cci_init() are released when idle.
++	 */
++	pm_runtime_idle(dev);
++
+ 	return 0;
+ 
+ error_i2c:

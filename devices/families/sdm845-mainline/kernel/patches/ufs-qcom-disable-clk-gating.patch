@@ -1,0 +1,45 @@
+From: Maximilian Gaedig <sly-keg-cheating@duck.com>
+Subject: [PATCH] scsi: ufs: qcom: drop clock gating on sdm845 to stop the resume wedge
+
+On the OnePlus 6 the UFS host intermittently wedges with
+power/runtime_status stuck at "resuming": SCSI never calls
+blk_post_runtime_resume(), every LUN request queue stays frozen, and all
+I/O blocks in __bio_queue_enter() with no UIC error and no abort. The
+userspace symptom is a system that looks alive -- the compositor keeps
+running from page cache and the UI responds -- while anything needing a
+fresh read (unlock/PAM, journald writes, service ExecStart binaries)
+blocks forever. It also silently defeats diagnostics: journald cannot
+write its own log, and a watchdog service cannot exec its own binary.
+
+The trigger is the runtime clock-gating cycle: ufshcd_gate_work() enters
+hibern8 and drops the clocks via ufs_qcom_setup_clocks(), and the ungate
+path occasionally fails to bring the link back. Disabling clock gating
+removes the cycle and the wedge with it.
+
+This is a stability-over-power trade and is NOT the end state: with the
+clocks ungated, gcc_ufs_phy_* stay enabled, which keeps gpll0 and the
+rpmhcc XO up and therefore keeps qcom_stats aosd/cxsd pinned at 0. It
+buys a machine that stays reachable long enough to diagnose the ungate
+failure properly, which has otherwise been impossible -- every attempt to
+instrument the failure was eaten by the failure.
+
+Signed-off-by: Maximilian Gaedig <sly-keg-cheating@duck.com>
+---
+--- a/drivers/ufs/host/ufs-qcom.c
++++ b/drivers/ufs/host/ufs-qcom.c
+@@ -1418,7 +1418,14 @@
+ {
+ 	struct ufs_qcom_host *host = ufshcd_get_variant(hba);
+ 
+-	hba->caps |= UFSHCD_CAP_CLK_GATING | UFSHCD_CAP_HIBERN8_WITH_CLK_GATING;
++	/*
++	 * Clock gating disabled: the ungate path intermittently fails to
++	 * bring the link out of hibern8, leaving runtime_status at
++	 * "resuming" with every LUN queue frozen and all I/O blocked in
++	 * __bio_queue_enter(). Costs idle power (gcc_ufs_phy_* stay on, so
++	 * the XO stays voted and aosd/cxsd stay 0) but keeps the machine
++	 * reachable. Re-enable once the ungate failure is understood.
++	 */
+ 	hba->caps |= UFSHCD_CAP_CLK_SCALING | UFSHCD_CAP_WB_WITH_CLK_SCALING;
+ 	hba->caps |= UFSHCD_CAP_AUTO_BKOPS_SUSPEND;
+ 	hba->caps |= UFSHCD_CAP_WB_EN;

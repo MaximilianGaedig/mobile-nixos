@@ -1,0 +1,32 @@
+--- a/arch/arm64/boot/dts/qcom/pm8998.dtsi
++++ b/arch/arm64/boot/dts/qcom/pm8998.dtsi
+@@ -101,7 +101,7 @@
+ 			status = "disabled";
+ 		};
+ 
+-		rtc@6000 {
++		pm8998_rtc: rtc@6000 {
+ 			compatible = "qcom,pm8941-rtc";
+ 			reg = <0x6000>, <0x6100>;
+ 			reg-names = "rtc", "alarm";
+--- a/arch/arm64/boot/dts/qcom/sdm845-oneplus-common.dtsi
++++ b/arch/arm64/boot/dts/qcom/sdm845-oneplus-common.dtsi
+@@ -1277,6 +1277,18 @@
+ 	qcom,preemphasis-width = <QUSB2_V2_PREEMPHASIS_WIDTH_HALF_BIT>;
+ };
+ 
++&pm8998_rtc {
++	/*
++	 * pm8998 has no SDAM, so the driver's nvmem "offset" fallback has
++	 * nowhere to persist to and setting the time fails outright -- which
++	 * is why the system clock comes up in 1970 and mobile-nixos has to
++	 * stash it in a file via swclock-offset. The remaining option is to
++	 * let the host write the RTC counter directly. If TZ has the register
++	 * locked the SPMI write simply errors out, so this is safe to try.
++	 */
++	allow-set-time;
++};
++
+ &tlmm {
+ 	gpio-reserved-ranges = <0 4>, <81 4>;
+ 

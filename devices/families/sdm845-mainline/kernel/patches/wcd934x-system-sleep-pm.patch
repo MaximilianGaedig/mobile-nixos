@@ -1,0 +1,109 @@
+--- a/include/linux/mfd/wcd934x/wcd934x.h
++++ b/include/linux/mfd/wcd934x/wcd934x.h
+@@ -4,6 +4,7 @@
+ #define __WCD934X_H__
+ #include <linux/clk.h>
+ #include <linux/regulator/consumer.h>
++#include <linux/gpio/consumer.h>
+ #include <linux/regmap.h>
+ #include <linux/slimbus.h>
+ 
+@@ -24,6 +25,7 @@
+ 	struct regmap_irq_chip_data *irq_data;
+ 	struct regmap *regmap;
+ 	struct clk *extclk;
++	struct gpio_desc *reset_gpio;
+ 	struct device *dev;
+ 	int irq;
+ };
+--- a/drivers/mfd/wcd934x.c
++++ b/drivers/mfd/wcd934x.c
+@@ -252,6 +252,7 @@
+ 	 */
+ 	usleep_range(600, 650);
+ 	reset_gpio = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_LOW);
++	ddata->reset_gpio = reset_gpio;
+ 	if (IS_ERR(reset_gpio)) {
+ 		ret = dev_err_probe(dev, PTR_ERR(reset_gpio),
+ 				    "Failed to get reset gpio\n");
+@@ -286,9 +287,80 @@
+ };
+ MODULE_DEVICE_TABLE(slim, wcd934x_slim_id);
+ 
++/*
++ * This MFD enabled its five supplies at probe and only dropped them at driver
++ * removal -- it had no dev_pm_ops whatsoever, so vdd-buck, vdd-buck-sido,
++ * vdd-tx, vdd-rx and vdd-io stayed up from boot to shutdown regardless of
++ * whether anything ever played audio. Drop them across system sleep, when the
++ * codec is unused and SLIMbus is suspended anyway; the regmap cache is marked
++ * dirty and resynced on resume after the documented power-up/reset sequence.
++ *
++ * Runtime PM is deliberately NOT attempted here: this is a SLIMbus device, so
++ * powering it down out from under an active bus needs re-enumeration and
++ * logical-address reassignment, which is a much larger change.
++ */
++static int __maybe_unused wcd934x_slim_suspend(struct device *dev)
++{
++	struct wcd934x_ddata *ddata = dev_get_drvdata(dev);
++
++	if (!ddata)
++		return 0;
++
++	if (ddata->regmap) {
++		regcache_cache_only(ddata->regmap, true);
++		regcache_mark_dirty(ddata->regmap);
++	}
++
++	if (ddata->reset_gpio)
++		gpiod_set_value(ddata->reset_gpio, 0);
++
++	regulator_bulk_disable(WCD934X_MAX_SUPPLY, ddata->supplies);
++
++	return 0;
++}
++
++static int __maybe_unused wcd934x_slim_resume(struct device *dev)
++{
++	struct wcd934x_ddata *ddata = dev_get_drvdata(dev);
++	int ret;
++
++	if (!ddata)
++		return 0;
++
++	ret = regulator_bulk_enable(WCD934X_MAX_SUPPLY, ddata->supplies);
++	if (ret) {
++		dev_err(dev, "Failed to re-enable supplies on resume: %d\n", ret);
++		return ret;
++	}
++
++	/* Same timing the probe path uses: Vout_A/Vout_D need ~600us before
++	 * SYS_RST_N may be raised. */
++	usleep_range(600, 650);
++	if (ddata->reset_gpio) {
++		gpiod_set_value(ddata->reset_gpio, 0);
++		msleep(20);
++		gpiod_set_value(ddata->reset_gpio, 1);
++		msleep(20);
++	}
++
++	if (ddata->regmap) {
++		regcache_cache_only(ddata->regmap, false);
++		ret = regcache_sync(ddata->regmap);
++		if (ret)
++			dev_err(dev, "Failed to resync regmap on resume: %d\n", ret);
++	}
++
++	return 0;
++}
++
++static const struct dev_pm_ops wcd934x_pm_ops = {
++	SET_SYSTEM_SLEEP_PM_OPS(wcd934x_slim_suspend, wcd934x_slim_resume)
++};
++
+ static struct slim_driver wcd934x_slim_driver = {
+ 	.driver = {
+ 		.name = "wcd934x-slim",
++		.pm = &wcd934x_pm_ops,
+ 	},
+ 	.probe = wcd934x_slim_probe,
+ 	.remove = wcd934x_slim_remove,

@@ -1,0 +1,174 @@
+From: Maximilian Gaedig <sly-keg-cheating@duck.com>
+Subject: [PATCH] drm/msm/dsi: balance power_on's PM reference, and release it
+ only after the PHY is disabled
+
+Two coupled bugs. Fixing the first alone reliably resets the SoC, so they
+must land together.
+
+1. msm_dsi_host_power_on() takes a pm_runtime reference on its success path
+   and never drops it -- the only pm_runtime_put() calls are on the error
+   unwind.  msm_dsi_host_power_off() then takes a *second* reference for its
+   teardown register access and drops only that one, so every display enable
+   leaks +1.  Measured on a OnePlus 6 (sdm845) by cycling the panel:
+
+       blanked  dpms=Off  dsi[active u=5 k=0]
+       woken    dpms=On   dsi[active u=6 k=0]
+       woken    dpms=On   dsi[active u=7 k=0]
+       woken    dpms=On   dsi[active u=8 k=0]
+
+   The count only ever rises, so the host never runtime-suspends.  On sdm845
+   the DSI host sits in the CX rpmh domain (power-domains = <&rpmhpd
+   SDM845_CX>), and rpmhpd's cx is not active_only, so to_active_sleep()
+   mirrors the active corner into the RPMH_SLEEP_STATE vote:
+
+	*active = corner;
+	if (pd->active_only)  *sleep = 0;
+	else                  *sleep = *active;
+
+   Only rpmhpd_power_off() drives that vote to 0, and genpd calls it only once
+   every device in the domain is runtime-suspended.  A leaked reference on the
+   DSI host therefore keeps CX voted on in the sleep set and the rail can never
+   collapse -- qcom_stats/cxsd stays 0 forever even though rpmh_flush() runs on
+   every cluster idle.
+
+2. Once (1) is fixed the host really does suspend, which exposes an ordering
+   bug in dsi_mgr_bridge_post_disable():
+
+	msm_dsi_host_power_off(host);	/* would drop the last reference */
+	...
+   disable_phy:
+	dsi_mgr_phy_disable(id);	/* writes PHY registers */
+
+   Letting the host suspend at power_off() time means msm_dsi_runtime_suspend()
+   gates the MDSS bus clocks, and the PHY register writes that follow hit a
+   dead bus.  On this platform TZ escalates that into a silent full SoC reset
+   with nothing in the kernel log.  Observed as a crash into Qualcomm dload
+   (05c6:900e) on the first display blank.
+
+   So keep power_on()'s reference across power_off() and release it from the
+   manager once the PHY is down, via msm_dsi_host_pm_release().
+
+Refcounting balances in both configurations:
+  plain:        power_on +1, pm_release -1
+  clk-gated:    power_on +1, enable() -1, power_off +1, pm_release -1
+
+Signed-off-by: Maximilian Gaedig <sly-keg-cheating@duck.com>
+---
+--- a/drivers/gpu/drm/msm/dsi/dsi_host.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_host.c
+@@ -2610,7 +2610,6 @@
+ {
+ 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+ 	const struct msm_dsi_cfg_handler *cfg_hnd = msm_host->cfg_hnd;
+-	int ret;
+ 
+ 	/*
+ 	 * If enable() gated the clocks, re-take the reference it dropped so the
+@@ -2632,10 +2631,13 @@
+ 		goto unlock_ret;
+ 	}
+ 
+-	/* Ensure clocks are enabled before register access */
+-	ret = pm_runtime_get_sync(&msm_host->pdev->dev);
+-	if (ret < 0)
+-		pm_runtime_put_noidle(&msm_host->pdev->dev);
++	/*
++	 * No get_sync here.  power_on() already resumed the device and still
++	 * holds the reference it took (power_on == true), so registers are
++	 * accessible without a fresh one -- and the gated path above re-took it
++	 * explicitly.  The put below therefore releases *that* reference rather
++	 * than a local one, which is what finally lets the host suspend.
++	 */
+ 
+ 	dsi_ctrl_disable(msm_host);
+ 
+--- a/drivers/gpu/drm/msm/dsi/dsi_host.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_host.c
+@@ -187,6 +187,12 @@
+ 	bool enabled;
+ 	/* command mode: link clocks + runtime-PM ref released between frames */
+ 	bool clk_gated;
++	/*
++	 * Set while power_on()'s runtime-PM reference is still held. It is
++	 * released by msm_dsi_host_pm_release() only after the PHY has been
++	 * torn down, because PHY register access needs the host's bus clocks.
++	 */
++	bool pm_held;
+ 	/* frame clocks currently re-acquired by kickoff_prepare() */
+ 	bool frame_clk_on;
+ 	int irq;
+@@ -2570,6 +2576,7 @@
+ 	}
+ 
+ 	pm_runtime_get_sync(&msm_host->pdev->dev);
++	msm_host->pm_held = true;
+ 	ret = cfg_hnd->ops->link_clk_set_rate(msm_host);
+ 	if (!ret)
+ 		ret = cfg_hnd->ops->link_clk_enable(msm_host);
+@@ -2606,6 +2613,21 @@
+ 	return ret;
+ }
+ 
++/*
++ * Drop the reference taken by msm_dsi_host_power_on(). Must be called only
++ * after the DSI PHY has been disabled -- see the comment in power_off().
++ */
++void msm_dsi_host_pm_release(struct mipi_dsi_host *host)
++{
++	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
++
++	if (!msm_host->pm_held)
++		return;
++
++	msm_host->pm_held = false;
++	pm_runtime_put(&msm_host->pdev->dev);
++}
++
+ int msm_dsi_host_power_off(struct mipi_dsi_host *host)
+ {
+ 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+@@ -2644,7 +2666,16 @@
+ 	pinctrl_pm_select_sleep_state(&msm_host->pdev->dev);
+ 
+ 	cfg_hnd->ops->link_clk_disable(msm_host);
+-	pm_runtime_put(&msm_host->pdev->dev);
++
++	/*
++	 * The runtime-PM reference is deliberately NOT dropped here.
++	 * dsi_mgr_bridge_post_disable() calls this function and only then
++	 * dsi_mgr_phy_disable(); if the host were allowed to suspend now,
++	 * msm_dsi_runtime_suspend() would gate the MDSS bus clocks and the
++	 * subsequent PHY register writes would hit a dead bus, which TZ
++	 * escalates into a silent SoC reset. msm_dsi_host_pm_release() drops
++	 * it once the PHY is down.
++	 */
+ 
+ 	regulator_bulk_disable(msm_host->cfg_hnd->cfg->num_regulators,
+ 			       msm_host->supplies);
+--- a/drivers/gpu/drm/msm/dsi/dsi_manager.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_manager.c
+@@ -380,6 +380,14 @@
+ 
+ disable_phy:
+ 	dsi_mgr_phy_disable(id);
++
++	/*
++	 * Only now is it safe to let the host runtime-suspend: the PHY is down,
++	 * so nothing further will touch PHY registers over the MDSS bus.
++	 */
++	msm_dsi_host_pm_release(host);
++	if (is_bonded_dsi && msm_dsi1)
++		msm_dsi_host_pm_release(msm_dsi1->host);
+ }
+ 
+ static void dsi_mgr_bridge_mode_set(struct drm_bridge *bridge,
+--- a/drivers/gpu/drm/msm/dsi/dsi.h
++++ b/drivers/gpu/drm/msm/dsi/dsi.h
+@@ -78,6 +78,7 @@
+ 			struct msm_dsi_phy_shared_timings *phy_shared_timings,
+ 			bool is_bonded_dsi, struct msm_dsi_phy *phy);
+ int msm_dsi_host_power_off(struct mipi_dsi_host *host);
++void msm_dsi_host_pm_release(struct mipi_dsi_host *host);
+ int msm_dsi_host_set_display_mode(struct mipi_dsi_host *host,
+ 				  const struct drm_display_mode *mode);
+ enum drm_mode_status msm_dsi_host_check_dsc(struct mipi_dsi_host *host,
